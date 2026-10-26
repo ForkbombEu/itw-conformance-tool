@@ -65,6 +65,7 @@ export {
   type ScenarioRegistryFilter
 } from './scenarios/registry.js';
 export { registerSelectedScenario } from './scenarios/selected-registration.js';
+export { isScenarioSelected, validateSelection } from './scenarios/selection.js';
 export { issuanceScenarioRegistry, issuanceScenarios } from './scenarios/issuance.js';
 export { presentationScenarioRegistry, presentationScenarios } from './scenarios/presentation.js';
 export { walletInstanceScenarioRegistry, walletInstanceScenarios } from './scenarios/wallet-instance.js';
