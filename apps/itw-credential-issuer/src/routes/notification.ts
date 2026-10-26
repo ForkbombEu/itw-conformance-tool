@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createObservedEvent, evaluateUserNeutralEventDescription } from '@itw-conformance-tool/conformance';
+import { createObservedEvent, evaluateUserNeutralEventDescription } from '@itw-conformance-tool/conformance/runtime';
 
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 

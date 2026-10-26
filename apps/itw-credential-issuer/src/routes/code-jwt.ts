@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 
 import { CodeJwtService, InvalidRequestUriError, formatSpecVersionHeader } from '../domain/index.js';
 import { makeCodeJwtParRepository, makeJwksRepository, makeOauthCallbacks } from '../plugins/index.js';

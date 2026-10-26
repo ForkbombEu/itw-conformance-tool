@@ -1,4 +1,4 @@
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 import { isInternalServiceRequest } from '@itw-conformance-tool/utils';
 
 import { createSubordinate } from '../federation/statements.js';

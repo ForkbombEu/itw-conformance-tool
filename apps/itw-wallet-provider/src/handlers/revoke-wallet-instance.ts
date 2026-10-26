@@ -1,4 +1,4 @@
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 import z from 'zod';
 
 import type { FastifyReply, FastifyRequest } from 'fastify';

@@ -1,4 +1,4 @@
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 import z from 'zod';
 
 import { buildRelyingPartyEntityConfiguration, findEntityConfigurationFault } from '../domain/entity-configuration.js';

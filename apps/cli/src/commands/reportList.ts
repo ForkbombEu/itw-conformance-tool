@@ -1,5 +1,5 @@
 import { loadConfig } from '@itw-conformance-tool/config';
-import { listSessions } from '@itw-conformance-tool/conformance';
+import { listSessions } from '@itw-conformance-tool/conformance/runtime';
 import { DatabaseClient } from '@itw-conformance-tool/database';
 import { logger } from '@itw-conformance-tool/logger';
 

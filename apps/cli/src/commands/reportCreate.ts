@@ -8,7 +8,7 @@ import {
   renderHtml,
   renderPdf,
   type ReportView
-} from '@itw-conformance-tool/conformance';
+} from '@itw-conformance-tool/conformance/runtime';
 import { DatabaseClient } from '@itw-conformance-tool/database';
 import { logger } from '@itw-conformance-tool/logger';
 

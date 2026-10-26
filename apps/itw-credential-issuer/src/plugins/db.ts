@@ -1,4 +1,4 @@
-import { SqliteScenarioEventRepository } from '@itw-conformance-tool/conformance';
+import { SqliteScenarioEventRepository } from '@itw-conformance-tool/conformance/runtime';
 import {
   DatabaseClient,
   SqliteDeferredCredentialRepository,

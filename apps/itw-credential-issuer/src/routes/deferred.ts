@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 
 import { DeferredCredentialAuthError, DeferredCredentialService, InvalidTransactionIdError } from '../domain/index.js';
 import { makeOauthCallbacks } from '../plugins/index.js';

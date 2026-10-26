@@ -1,4 +1,4 @@
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 import { hashCallback } from '@itw-conformance-tool/crypto';
 import { toResult } from '@itw-conformance-tool/utils';
 import {

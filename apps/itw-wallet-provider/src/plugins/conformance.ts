@@ -1,7 +1,7 @@
 import {
   createConformanceInstrumentationPlugin,
   SqliteScenarioEventRepository
-} from '@itw-conformance-tool/conformance';
+} from '@itw-conformance-tool/conformance/runtime';
 import { DatabaseClient } from '@itw-conformance-tool/database';
 import fp from 'fastify-plugin';
 

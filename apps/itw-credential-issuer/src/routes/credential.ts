@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 import { sha256HashArtifact } from '@itw-conformance-tool/utils';
 
 import {

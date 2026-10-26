@@ -1,4 +1,7 @@
-import { createConformanceInstrumentationPlugin, type ScenarioCorrelation } from '@itw-conformance-tool/conformance';
+import {
+  createConformanceInstrumentationPlugin,
+  type ScenarioCorrelation
+} from '@itw-conformance-tool/conformance/runtime';
 import fp from 'fastify-plugin';
 
 type ExpiringCorrelation = ScenarioCorrelation & {

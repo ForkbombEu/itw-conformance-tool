@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createObservedEvent } from '@itw-conformance-tool/conformance';
+import { createObservedEvent } from '@itw-conformance-tool/conformance/runtime';
 import { decodeJwt } from 'jose';
 
 import { type StatusListSettings, StatusListService } from '../domain/index.js';
