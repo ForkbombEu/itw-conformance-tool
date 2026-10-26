@@ -108,7 +108,7 @@ export class JobManager {
     this.updateRun(run.runId, (r) => ({ ...r, status: 'running' }));
 
     try {
-      await this.execute({
+      const evidence = await this.execute({
         abortSignal: abortController.signal,
         request: run.request,
         runId: run.runId,
@@ -119,7 +119,7 @@ export class JobManager {
       if (current && isTerminalStatus(current.status)) return;
       if (current?.cancelRequested) return;
 
-      this.updateRun(run.runId, (r) => ({ ...r, status: 'completed' }));
+      this.updateRun(run.runId, (r) => ({ ...r, result: evidence.result, status: 'completed' }));
     } catch {
       const current = this.store.getRun(run.runId);
       if (current && isTerminalStatus(current.status)) return;
@@ -139,7 +139,10 @@ export class JobManager {
     const run = this.store.getRun(runId);
     if (!run) throw notFound(runId);
     if (!isTerminalStatus(run.status)) throw resultNotReady();
-    throw new RunnerError('RESULT_UNAVAILABLE', 409, 'Result not yet available');
+    if (!run.result) {
+      throw new RunnerError('RESULT_UNAVAILABLE', 409, 'Terminal run has no readable result');
+    }
+    return run.result;
   }
 
   async cancel(runId: string): Promise<RunSnapshot> {

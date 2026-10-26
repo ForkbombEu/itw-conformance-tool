@@ -11,6 +11,7 @@ export interface StoredRun {
   namespace: string;
   request: RunRequest;
   requestHash: string;
+  result?: import('./contract.js').RunnerResult;
   runId: string;
   status: RunStatus;
   updatedAt: string;
