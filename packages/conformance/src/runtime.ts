@@ -188,6 +188,13 @@ export type {
 } from './verdict/outcome.js';
 export type { ArtifactValidationResult } from './verdict/rules.js';
 export { renderPdf } from './report/pdf.js';
+export {
+  buildNativeExport,
+  writeNativeExport,
+  type NativeAssertion,
+  type NativeExport
+} from './report/native-export.js';
+export { extractDescription, extractRequirementId } from './report/requirement-id.js';
 export { getLatestSessionId, getSession, listSessions } from './report/session-store.js';
 export { renderHtml } from './report/template/index.js';
 export type { ReportView } from './report/template/types.js';
