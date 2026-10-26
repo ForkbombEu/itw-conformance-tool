@@ -41,6 +41,7 @@ import type { ScenarioEventBridgeFactory } from '../events/event-bridge.js';
 import type { ObservedEventName, ObservedServiceName } from '../events/event-types.js';
 import type { ScenarioRegistry } from '../scenarios/registry.js';
 import type { ScenarioOutcome, ScenarioTimingSummary } from '../verdict/outcome.js';
+import type { EngagementDriver, EngagementInteraction } from './engagement-driver.js';
 import type { IssuerFaultProfile } from '@itw-conformance-tool/faults';
 
 /** Default IT Wallet specification version reported at issuer fault activation when not overridden. */
@@ -110,6 +111,8 @@ export interface CreateProtocolObservedScenarioRunnerOptions {
   walletAuthBaseUri?: string;
   /** Prints protocol diagnostics such as full URIs, technical event names, and internal endpoints. */
   verbose?: boolean;
+  /** Optional engagement driver for automated wallet interaction. When present, showInstructions publishes an interaction and returns immediately. */
+  engagementDriver?: EngagementDriver;
 }
 
 function defaultWrite(message: string): void {
@@ -604,6 +607,8 @@ export function createProtocolObservedScenarioRunner(
       let eventSubscription: Disposable | undefined;
       let stopped = false;
       let outcome: ScenarioOutcome | undefined;
+      let interactionPublished = false;
+      let activeInteractionId: string | undefined;
       let credentialOfferPageOpened = false;
       let presentationRequestPageOpened = false;
 
@@ -759,6 +764,36 @@ export function createProtocolObservedScenarioRunner(
           events: eventStore,
           abortSignal: abortController.signal,
           async showInstructions() {
+            // Driver branch: publish a single typed interaction and return
+            // immediately. Do NOT await wallet ACK or protocol completion.
+            if (options.engagementDriver) {
+              if (!interactionPublished) {
+                interactionPublished = true;
+                const expiresAt = new Date(Date.now() + definition.timeouts.testerActionMs).toISOString();
+                const interaction: EngagementInteraction = {
+                  correlationId,
+                  expiresAt,
+                  interactionId: `interaction-${initialCorrelationId}`,
+                  kind:
+                    stimulus.type === 'presentation-request'
+                      ? 'wallet_deeplink'
+                      : stimulus.type === 'credential-offer'
+                        ? 'wallet_deeplink'
+                        : 'browser_authorization',
+                  scenarioId: definition.id,
+                  uri:
+                    stimulus.type === 'manual-instruction'
+                      ? stimulus.text
+                      : stimulus.type === 'web-url'
+                        ? stimulus.url
+                        : stimulus.uri
+                };
+                activeInteractionId = interaction.interactionId;
+                await options.engagementDriver.publish(interaction);
+              }
+              return;
+            }
+
             // A scenario declaring a QR delivery gets the engagement rendered as
             // a scannable code; a deep-link one is transferred to the wallet's
             // device by the tester, from the clipboard.
@@ -868,6 +903,9 @@ export function createProtocolObservedScenarioRunner(
               timings: createTimings(startedAt)
             });
             writeOutcome(outcome, write);
+            if (options.engagementDriver?.recordOutcome) {
+              await options.engagementDriver.recordOutcome(outcome);
+            }
             return outcome;
           },
           async stop() {
@@ -879,6 +917,11 @@ export function createProtocolObservedScenarioRunner(
             eventStore.close();
             activeSessions.delete(session);
             if (!outcome) write(`Scenario ${definition.id} stopped before verdict.`);
+            // Close interaction in finally, even after an exception.
+            if (activeInteractionId && options.engagementDriver) {
+              await options.engagementDriver.close(activeInteractionId).catch(() => undefined);
+              activeInteractionId = undefined;
+            }
             // Deactivate last so any deactivation failure still surfaces to the caller.
             await deactivateIssuerConfigIfActive();
             await deactivateIssuerFaultIfActive();

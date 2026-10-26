@@ -54,6 +54,7 @@ export type {
   StartScenarioOptions
 } from './runner/scenario-runner.js';
 export { createProtocolObservedScenarioRunner } from './runner/scenario-runner.js';
+export type { EngagementDriver, EngagementInteraction } from './runner/engagement-driver.js';
 export { createPresentationRequestPageUrl, renderTerminalQrCode, targetsLoopbackHost } from './runner/engagement.js';
 export { createScenarioPromptModel, type ScenarioPromptModel } from './runner/prompts.js';
 export { resolveTimeoutProfile, type ResolvedTimeoutProfile } from './runner/timeout-profile.js';
