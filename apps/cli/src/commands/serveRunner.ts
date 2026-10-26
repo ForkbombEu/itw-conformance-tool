@@ -1,0 +1,67 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { ArtifactStore } from '../runner-api/artifacts.js';
+import { JobManager } from '../runner-api/job-manager.js';
+import { JobStore } from '../runner-api/job-store.js';
+import { validateProfile } from '../runner-api/profiles.js';
+import { createRunnerServer } from '../runner-api/server.js';
+
+export interface ServeRunnerOptions {
+  host: string;
+  port: number;
+  profiles: string;
+  stateDir: string;
+}
+
+export interface ServeRunnerHandle {
+  close(): Promise<void>;
+  url: string;
+}
+
+export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRunnerHandle> {
+  const token = process.env.CREDIMI_RUNNER_TOKEN;
+  if (!token) {
+    throw new Error('CREDIMI_RUNNER_TOKEN environment variable is required');
+  }
+
+  const port = Number(options.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Invalid port: ${options.port}`);
+  }
+
+  const profilesPath = resolve(options.profiles);
+  if (!existsSync(profilesPath)) {
+    throw new Error(`Profiles file not found: ${profilesPath}`);
+  }
+
+  const stateDir = resolve(options.stateDir);
+
+  // Load and validate profiles
+  const { readFileSync } = await import('node:fs');
+  const raw = JSON.parse(readFileSync(profilesPath, 'utf-8')) as { profiles?: unknown[] };
+  (raw.profiles ?? []).forEach((p) => validateProfile(p));
+
+  // Setup job store and manager
+  const store = new JobStore(stateDir);
+  if (!store.acquireRootLock('serve-runner')) {
+    throw new Error(`State directory ${stateDir} is already locked by another process`);
+  }
+
+  const artifacts = new ArtifactStore();
+  const execute = async () => {
+    throw new Error('Executor not configured');
+  };
+  const jobManager = new JobManager({ execute, store });
+  const app = createRunnerServer({ artifacts, jobManager });
+
+  await app.listen({ host: options.host, port });
+  const url = `http://${options.host}:${port}`;
+
+  const close = async (): Promise<void> => {
+    await jobManager.shutdown();
+    await app.close();
+  };
+
+  return { close, url };
+}
