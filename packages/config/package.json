@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "ini": "^7.0.0",
+    "vitest": "catalog:",
     "zod": "catalog:",
     "tslib": "^2.3.0"
   },

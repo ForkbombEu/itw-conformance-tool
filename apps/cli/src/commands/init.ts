@@ -30,6 +30,9 @@ import {
 import { existsFileSync } from '../utils/search.js';
 
 export type InitFlags = {
+  configPath?: string;
+  cwd?: string;
+  dataDir?: string;
   force: boolean;
 };
 
@@ -47,15 +50,24 @@ type InitConfig = {
  * @returns The parsed configuration object.
  */
 function checkConfig(flags: InitFlags): InitConfig {
-  const configFilePath = resolve(process.cwd(), 'config.ini');
-  if (!existsFileSync(configFilePath) || flags.force) {
-    writeFileSync(configFilePath, ConfigIniTemplate, { encoding: 'utf8', flag: 'w' });
-    process.stdout.write(`✓ ${flags.force ? 'Overwritten' : 'Created'} config.ini → ./config.ini\n`);
-  } else {
-    process.stdout.write(`✓ config.ini already exists → skipped (use --force to overwrite)\n`);
+  const cwd = flags.cwd ?? process.cwd();
+  const configFilePath = flags.configPath ? resolve(cwd, flags.configPath) : resolve(cwd, 'config.ini');
+
+  // Only create config.ini if no alternate config was explicitly supplied
+  if (!flags.configPath) {
+    if (!existsFileSync(configFilePath) || flags.force) {
+      writeFileSync(configFilePath, ConfigIniTemplate, { encoding: 'utf8', flag: 'w' });
+      process.stdout.write(`✓ ${flags.force ? 'Overwritten' : 'Created'} config.ini → ./config.ini\n`);
+    } else {
+      process.stdout.write(`✓ config.ini already exists → skipped (use --force to overwrite)\n`);
+    }
   }
 
-  const rawConfigs = loadConfig();
+  const rawConfigs = loadConfig({
+    configPath: flags.configPath,
+    cwd: flags.cwd,
+    dataDir: flags.dataDir
+  });
   const previousDataDir = rawConfigs.global.data_dir;
   const configs: InitConfig = {
     global: rawConfigs.global,

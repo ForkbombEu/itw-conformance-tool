@@ -8,6 +8,12 @@ import type { ConfigSchemaType } from './schemas.js';
 
 export const DEFAULT_CONFIG_FILE = 'config.ini';
 
+export interface LoadConfigOptions {
+  configPath?: string;
+  cwd?: string;
+  dataDir?: string;
+}
+
 export function expandPath(pathValue: string, cwd = process.cwd()): string {
   const normalizedPath = pathValue.replace(/["'`]+/g, '').trim();
 
@@ -32,13 +38,40 @@ export function expandConfigDataDir(config: ConfigSchemaType, cwd = process.cwd(
   };
 }
 
-export function loadConfig(): ConfigSchemaType {
-  const cwd = process.cwd();
-  const configFilePath = expandPath(DEFAULT_CONFIG_FILE);
+export function loadConfig(options?: LoadConfigOptions): ConfigSchemaType {
+  const cwd = options?.cwd ?? process.cwd();
 
-  if (!existsSync(configFilePath)) {
-    throw new Error(`Config file not found at path: ${configFilePath}`);
+  // Resolve config path: explicit option > env override > default
+  const envConfigPath = process.env.ITWCT_CONFIG_PATH?.trim();
+  const configPath = options?.configPath
+    ? expandPath(options.configPath, cwd)
+    : envConfigPath
+      ? expandPath(envConfigPath, cwd)
+      : expandPath(DEFAULT_CONFIG_FILE, cwd);
+
+  if (!existsSync(configPath)) {
+    throw new Error(`Config file not found at path: ${configPath}`);
   }
 
-  return expandConfigDataDir(parseConfigIni(configFilePath), cwd);
+  const config = parseConfigIni(configPath);
+
+  // Resolve data_dir: explicit option > env override > config value
+  const envDataDir = process.env.ITWCT_DATA_DIR?.trim();
+  const dataDir = options?.dataDir
+    ? expandPath(options.dataDir, cwd)
+    : envDataDir
+      ? expandPath(envDataDir, cwd)
+      : undefined;
+
+  const withDataDir: ConfigSchemaType = dataDir
+    ? {
+        ...config,
+        global: {
+          ...config.global,
+          data_dir: dataDir
+        }
+      }
+    : config;
+
+  return expandConfigDataDir(withDataDir, cwd);
 }
