@@ -23,7 +23,8 @@
     "itw-trust-anchor": "workspace:*",
     "itw-wallet-provider": "workspace:*",
     "@peculiar/x509": "^1.12.4",
-    "commander": "^15.0.0"
+    "commander": "^15.0.0",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "fastify": "catalog:fastify",
