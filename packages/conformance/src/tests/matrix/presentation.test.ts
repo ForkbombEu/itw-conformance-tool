@@ -30,6 +30,7 @@ import {
   wpRpHappyScenario
 } from '../../index.js';
 import { registerSelectedScenario } from '../../scenarios/selected-registration.js';
+import { validateSelection } from '../../scenarios/selection.js';
 import { httpsRequest } from '../../utils/request.js';
 
 import type {
@@ -142,6 +143,21 @@ const selectedScenarioIds = (process.env[SCENARIO_IDS_ENV_VAR] ?? '')
   .filter((id) => id.length > 0);
 
 const isAutomated = Boolean(process.env.ITWCT_AUTOMATION_DIR && process.env.ITWCT_RUN_ID);
+
+// An automated run must name the scenarios it executes: an empty or unknown
+// selection fails collection instead of silently registering every scenario.
+if (isAutomated) {
+  const selection = validateSelection({
+    automated: true,
+    requestedIds: selectedScenarioIds,
+    supportedIds: presentationScenarioRegistry.list().map((definition) => definition.id)
+  });
+  if (!selection.valid) {
+    throw new Error(
+      `Automated presentation run requires a non-empty, duplicate-free ${SCENARIO_IDS_ENV_VAR} of known scenario IDs (received '${selectedScenarioIds.join(',')}')`
+    );
+  }
+}
 
 function isSelected(definition: ProtocolObservedScenarioDefinition): boolean {
   return selectedScenarioIds.length === 0 || selectedScenarioIds.includes(definition.id);

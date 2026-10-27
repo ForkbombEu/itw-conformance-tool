@@ -4,7 +4,7 @@
 **Branch:** `main`
 **HEAD:** `964a98d75cf7f986ae2fca719492f3fa6df68556`
 **Repair pack:** `/home/bario/pagopa-runner-repairs-20261027/`
-**Status:** All 7 prompts complete. Pushed to origin/main.
+**Status:** N01–N07 were reported complete by the previous model; the 27 Oct follow-up review (`/home/bario/pagopa-followup-20261027/REVIEW.md`) found them PARTIAL. Follow-up repairs N08–N15 are tracked below; read that table, not the N01–N07 table, for current status.
 
 ---
 
@@ -148,3 +148,22 @@ pnpm build
 - Issuance automation NOT IMPLEMENTED (by design — presentation first)
 - Native file engagement driver not wired to scenario runner env resolver (N03 partial)
 - `engine.revision` is `"unknown"` — needs real build metadata at runtime
+
+---
+
+## Follow-up pack N08–N15 (27 Oct 2026 review)
+
+Per-task handoffs: `/home/bario/pagopa-followup-20261027/handoffs/Nxx.md`.
+
+| Task | Status                 | Commit(s)                    | Gate                                            |
+| ---- | ---------------------- | ---------------------------- | ----------------------------------------------- |
+| N08  | Done (audit completed) | `de11998`, completion commit | Real matrix collection via `vitest list` — PASS |
+| N09  | NOT RUN                |                              |                                                 |
+| N10  | NOT RUN                |                              |                                                 |
+| N11  | NOT RUN                |                              |                                                 |
+| N12  | NOT RUN                |                              |                                                 |
+| N13  | NOT RUN                |                              |                                                 |
+| N14  | NOT RUN                |                              |                                                 |
+| N15  | NOT RUN                |                              |                                                 |
+
+Live SUT: NOT RUN (no operator SUT/wallet supplied).
