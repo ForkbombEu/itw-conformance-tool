@@ -40,7 +40,7 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
   // Load and validate profiles
   const { readFileSync } = await import('node:fs');
   const raw = JSON.parse(readFileSync(profilesPath, 'utf-8')) as { profiles?: unknown[] };
-  (raw.profiles ?? []).forEach((p) => validateProfile(p));
+  const profiles = (raw.profiles ?? []).map((p) => validateProfile(p));
 
   // Setup job store and manager
   const store = new JobStore(stateDir);
@@ -49,10 +49,17 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
   }
 
   const artifacts = new ArtifactStore();
-  const execute = async () => {
-    throw new Error('Executor not configured');
+  const execute = async (ctx: { abortSignal: AbortSignal; request: any; runId: string; runRoot: string }) => {
+    const { createNativeExecutor } = await import('../runner-api/native-worker.js');
+    const profile = profiles[0];
+    if (!profile) throw new Error('No profile loaded');
+    const nativeExecutor = createNativeExecutor({
+      profile,
+      request: ctx.request
+    });
+    return nativeExecutor(ctx as never);
   };
-  const jobManager = new JobManager({ execute, store });
+  const jobManager = new JobManager({ execute: execute as never, store });
   const app = createRunnerServer({ artifacts, jobManager });
 
   await app.listen({ host: options.host, port });

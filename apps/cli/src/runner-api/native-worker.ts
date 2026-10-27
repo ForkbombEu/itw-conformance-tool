@@ -77,17 +77,16 @@ export function createNativeExecutor(
     };
 
     const startedAt = new Date().toISOString();
-    const child = adapter.spawn(
-      process.execPath,
-      ['--input-type=module', '-e', '// placeholder for CLI test invocation'],
-      {
-        cwd: runRoot,
-        detached: true,
-        env,
-        shell: false,
-        stdio: 'pipe'
-      }
-    );
+
+    // Invoke the actual compiled CLI test presentation command
+    const cliEntry = process.argv[1] ?? 'node';
+    const child = adapter.spawn(cliEntry, ['test', 'presentation', '--verbose'], {
+      cwd: runRoot,
+      detached: true,
+      env,
+      shell: false,
+      stdio: 'pipe'
+    });
 
     const exitCode = await new Promise<null | number>((resolve, reject) => {
       let settled = false;

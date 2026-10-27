@@ -52,6 +52,23 @@ export function createProgram(): Command {
       await reportCreate(runId, format, options.view);
     });
 
+  program
+    .command('serve-runner')
+    .description('Start the HTTP runner API server')
+    .option('--host <host>', 'Host to bind to', '127.0.0.1')
+    .option('--port <port>', 'Port to bind to', '8788')
+    .option('--state-dir <dir>', 'State directory', process.cwd())
+    .option('--profiles <file>', 'Absolute path to profiles JSON file')
+    .action(async (opts) => {
+      const { serveRunner } = await import('./commands/serveRunner.js');
+      await serveRunner({
+        host: opts.host,
+        port: Number(opts.port),
+        profiles: opts.profiles ?? '',
+        stateDir: opts.stateDir
+      });
+    });
+
   program.version(readPackageVersion(), '-v, --version', 'display the CLI version');
 
   return program;
