@@ -24,8 +24,26 @@ export function summarizeResult(execution: Execution, native: Native): Summary {
     };
   }
 
-  // Rule 2: failed assertion or scenario FAIL → fail
-  if (nativeFailedCount > 0 || scenarioFail) {
+  // Explicit scenario FAIL → fail (dominates)
+  if (scenarioFail) {
+    return {
+      assertion_count: assertionCount,
+      native_failed_assertion_count: nativeFailedCount,
+      result: 'fail'
+    };
+  }
+
+  // INCONCLUSIVE scenario: stays inconclusive even with failed assertions
+  if (scenarioInconclusive) {
+    return {
+      assertion_count: assertionCount,
+      native_failed_assertion_count: nativeFailedCount,
+      result: 'inconclusive'
+    };
+  }
+
+  // Failed assertion without INCONCLUSIVE → fail
+  if (nativeFailedCount > 0) {
     return {
       assertion_count: assertionCount,
       native_failed_assertion_count: nativeFailedCount,

@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { assertSelectionAllowed } from './profiles.js';
+import { summarizeResult } from './summarize.js';
 
 import type { RunRequest, RunnerResult } from './contract.js';
 import type { Profile } from './profiles.js';
@@ -169,18 +170,14 @@ export function createNativeExecutor(
         artifacts: [],
         category: profile.category,
         contract_version: '1.0',
-        engine: { ...ENGINE_INFO, revision: nativeExport.session_id, version: '1.0' },
+        engine: { ...ENGINE_INFO, revision: 'unknown', version: '1.0' },
         execution,
         limitations: [],
         native,
         profile_id: profile.id,
         run_id: runId,
         selection: request.selection,
-        summary: {
-          assertion_count: nativeExport.assertions.length,
-          native_failed_assertion_count: nativeExport.assertions.filter((a) => a.native_status === 'FAIL').length,
-          result: nativeExport.assertions.length === 0 ? 'not_tested' : 'pass'
-        },
+        summary: summarizeResult(execution, native),
         target: request.target
       }
     };

@@ -86,8 +86,8 @@ describe('summarizeResult — aggregation table', () => {
       scenario_outcomes: [{ scenario_id: 's1', verdict: 'INCONCLUSIVE' }],
       sessions: []
     });
-    // Rule 2: failed assertion → fail (dominates)
-    expect(s.result).toBe('fail');
+    // INCONCLUSIVE scenario with failed assertion → inconclusive (per canonical contract)
+    expect(s.result).toBe('inconclusive');
     expect(s.native_failed_assertion_count).toBe(1);
   });
 
