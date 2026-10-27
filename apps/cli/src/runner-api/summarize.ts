@@ -1,3 +1,4 @@
+import type { PublicationFailure } from './artifacts.js';
 import type { RunnerResult } from './contract.js';
 
 type Native = RunnerResult['native'];
@@ -129,4 +130,24 @@ export function summarizeWithLimitations(
 
 export function summarizeResult(execution: Execution, native: Native, context: SummaryContext = {}): Summary {
   return summarizeWithLimitations(execution, native, context).summary;
+}
+
+/**
+ * Evidence completeness as a separate aggregation input, applied after the
+ * native/lifecycle summary: a declared raw evidence artifact that failed its
+ * initial publication cannot back a pass, so pass becomes inconclusive. Every
+ * other result (fail, partial, not_tested, inconclusive) and every native
+ * verdict is kept; informational limitations never reach this function.
+ */
+export function applyEvidenceCompleteness(
+  summary: Summary,
+  publicationFailures: readonly PublicationFailure[]
+): SummaryWithLimitations {
+  if (publicationFailures.length === 0) return { limitations: [], summary };
+  const names = [...new Set(publicationFailures.map((failure) => failure.filename))].join(', ');
+  const limitation = `Declared evidence artifact(s) could not be published (${names}); the aggregate result cannot be pass and native verdicts are unchanged.`;
+  return {
+    limitations: [limitation],
+    summary: summary.result === 'pass' ? { ...summary, result: 'inconclusive' } : summary
+  };
 }

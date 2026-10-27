@@ -9,6 +9,7 @@ import { runnerResultSchema } from '../../runner-api/contract.js';
 import { JobManager } from '../../runner-api/job-manager.js';
 import { JobStore } from '../../runner-api/job-store.js';
 
+import type { PublicationFailure } from '../../runner-api/artifacts.js';
 import type { RunnerResult, RunRequest, RunSnapshot } from '../../runner-api/contract.js';
 import type { ExecuteContext, ExecuteFn, ExecutionEvidence } from '../../runner-api/job-manager.js';
 
@@ -111,8 +112,8 @@ afterEach(async () => {
   rmSync(dir, { force: true, recursive: true });
 });
 
-function manager(execute: ExecuteFn, extra: { abortGraceMs?: number } = {}): JobManager {
-  const m = new JobManager({ execute, store: new JobStore(dir), ...extra });
+function manager(execute: ExecuteFn, extra: { abortGraceMs?: number } = {}, store = new JobStore(dir)): JobManager {
+  const m = new JobManager({ execute, store, ...extra });
   managers.push(m);
   return m;
 }
@@ -302,6 +303,109 @@ describe('JobManager lifecycle truth', () => {
       expect(result.summary.result, key).toBe('fail');
       expect(result.summary.native_failed_assertion_count).toBe(2);
       await m.shutdown();
+    }
+  });
+});
+
+// UNIT (R17): typed executor/publisher test doubles. The double reports a
+// declared artifact that failed its initial publication through the typed
+// internal input, WITHOUT pre-downgrading the summary, so the manager's own
+// aggregation is what is proven here. Not native integration proof.
+const MISSING: PublicationFailure = {
+  artifactId: 'native-results',
+  filename: 'native-results.json',
+  reason: 'missing'
+};
+
+function unpublished(e: ExecutionEvidence, failures: PublicationFailure[] = [MISSING]): ExecutionEvidence {
+  return { ...e, publicationFailures: failures };
+}
+
+describe('JobManager evidence completeness (R17, UNIT)', () => {
+  it('completed native PASS + failed publication → inconclusive; native verdicts unchanged', async () => {
+    const m = manager(async (ctx) => unpublished(evidence(ctx, [assertion('a1', 'PASS')])));
+    const { snapshot } = await m.submit(request(), 'r17-1');
+    await terminal(m, snapshot.run_id);
+    const result = await expectAgreement(m, snapshot.run_id, 'completed');
+    expect(result.summary.result).toBe('inconclusive');
+    expect(result.native.assertions.map((a) => a.native_status)).toEqual(['PASS']);
+    expect(result.native.native_suite_status).toBe('PASSED');
+    expect(result.artifacts).toEqual([]);
+    expect(result.limitations.join(' ')).toContain('could not be published');
+  });
+
+  it('no publication failure + only a benign limitation keeps a real pass', async () => {
+    const m = manager(async (ctx) => {
+      const e = evidence(ctx, [assertion('a1', 'PASS')], {}, [ARTIFACT]);
+      e.result.limitations = ['engine.revision is unknown: no trusted build/source revision was supplied.'];
+      return { ...e, publicationFailures: [] };
+    });
+    const { snapshot } = await m.submit(request(), 'r17-2');
+    await terminal(m, snapshot.run_id);
+    const result = await expectAgreement(m, snapshot.run_id, 'completed');
+    expect(result.summary.result).toBe('pass');
+  });
+
+  it('an unknown worker status recomputes but never restores pass over a failed publication', async () => {
+    const m = manager(async (ctx) => unpublished(evidence(ctx, [assertion('a1', 'PASS')], { status: 'weird' })));
+    const { snapshot } = await m.submit(request(), 'r17-3');
+    await terminal(m, snapshot.run_id);
+    const result = await expectAgreement(m, snapshot.run_id, 'error');
+    expect(result.summary.result).not.toBe('pass');
+    expect(result.limitations.join(' ')).toContain('could not be published');
+  });
+
+  it('cancel/deadline with partial PASS assertions stays partial, keeps the published artifact and the limitation', async () => {
+    for (const [key, cancel] of [
+      ['r17-cancel', true],
+      ['r17-deadline', false]
+    ] as const) {
+      const m = manager(async (ctx) => {
+        await untilAborted(ctx);
+        return unpublished(evidence(ctx, [assertion('a1', 'PASS')], {}, [ARTIFACT]), [
+          { artifactId: 'session-log', filename: 'session.log', reason: 'unreadable' }
+        ]);
+      });
+      const { snapshot } = await m.submit(request(cancel ? 60_000 : 1_000), key);
+      if (cancel) await m.cancel(snapshot.run_id);
+      await terminal(m, snapshot.run_id);
+      const result = await expectAgreement(m, snapshot.run_id, cancel ? 'cancelled' : 'timed_out');
+      expect(result.summary.result, key).toBe('partial');
+      expect(result.artifacts).toEqual([ARTIFACT]);
+      expect(result.limitations.join(' ')).toContain('could not be published');
+      await m.shutdown();
+    }
+  });
+
+  it('a native FAIL with a failed publication stays fail', async () => {
+    const m = manager(async (ctx) =>
+      unpublished(evidence(ctx, [assertion('a1', 'PASS'), assertion('a2', 'FAIL')], { exit_code: 1 }))
+    );
+    const { snapshot } = await m.submit(request(), 'r17-5');
+    await terminal(m, snapshot.run_id);
+    expect((await expectAgreement(m, snapshot.run_id, 'completed')).summary.result).toBe('fail');
+  });
+
+  it('the nonpass decision survives a manager restart (recovery) and same-key replay', async () => {
+    const m = manager(async (ctx) => unpublished(evidence(ctx, [assertion('a1', 'PASS')])));
+    const { snapshot } = await m.submit(request(), 'r17-6');
+    await terminal(m, snapshot.run_id);
+    const before = await m.getResult(snapshot.run_id);
+    await m.shutdown();
+
+    const store = new JobStore(dir);
+    expect(store.acquireRootLock()).toBe(true);
+    try {
+      const reopened = manager(async (ctx) => evidence(ctx, [assertion('a1', 'PASS')]), {}, store);
+      expect(reopened.recoverInterruptedRuns().recovered).toEqual([]);
+      const replay = await reopened.submit(request(), 'r17-6');
+      expect(replay.replayed).toBe(true);
+      expect(replay.snapshot.run_id).toBe(snapshot.run_id);
+      const after = await reopened.getResult(snapshot.run_id);
+      expect(after).toEqual(before);
+      expect(after.summary.result).toBe('inconclusive');
+    } finally {
+      store.releaseRootLock();
     }
   });
 });

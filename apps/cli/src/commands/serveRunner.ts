@@ -1,14 +1,19 @@
 import { resolve } from 'node:path';
 
-import { ArtifactStore } from '../runner-api/artifacts.js';
+import { ArtifactStore, type ArtifactSourceReader, type PublicationFailure } from '../runner-api/artifacts.js';
 import { JobManager, type ExecuteContext, type ExecutionEvidence } from '../runner-api/job-manager.js';
 import { JobStore } from '../runner-api/job-store.js';
 import { resolveEngineIdentity } from '../runner-api/native-launch.js';
 import { createNativeExecutor, type ProcessAdapter } from '../runner-api/native-worker.js';
 import { loadProfileCatalogue } from '../runner-api/profiles.js';
 import { createRunnerServer } from '../runner-api/server.js';
+import { applyEvidenceCompleteness } from '../runner-api/summarize.js';
+
+import type { RunnerResult } from '../runner-api/contract.js';
 
 export interface ServeRunnerOptions {
+  /** Internal test-only seam for reading worker artifacts at publication; production reads the real filesystem. */
+  artifactSourceReader?: ArtifactSourceReader;
   host: string;
   /** Internal low-level subprocess boundary; production uses real OS processes. */
   processAdapter?: ProcessAdapter;
@@ -45,7 +50,10 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
   }
 
   try {
-    const artifacts = new ArtifactStore(stateDir);
+    const artifacts = new ArtifactStore(
+      stateDir,
+      options.artifactSourceReader ? { readSource: options.artifactSourceReader } : {}
+    );
     const execute = async (ctx: ExecuteContext): Promise<ExecutionEvidence> => {
       const profile = catalogue.get(ctx.request.profile_id);
       if (!profile) throw new Error(`Unknown profile_id '${ctx.request.profile_id}'`);
@@ -93,31 +101,52 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
 /**
  * Production artifact finalization: publishes the worker's raw evidence files
  * through the persistent artifact store and returns the result carrying
- * exactly those manifest entries (no private paths).
+ * exactly those manifest entries (no private paths). Declared artifacts that
+ * failed initial publication are returned as the typed `publicationFailures`
+ * aggregation input; only those (never informational limitations) turn a
+ * pass into inconclusive. An exception from the publication path keeps the
+ * collected native data and yields an honest readable result.
  */
 export function finalizeEvidence(
   artifacts: ArtifactStore,
   runId: string,
   evidence: ExecutionEvidence
 ): ExecutionEvidence {
-  const { entries, limitations } = artifacts.finalize(runId, evidence.privateArtifacts);
-  // Evidence that could not be published cannot back a pass.
-  const unpublished = limitations.length > 0 && evidence.result.summary.result === 'pass';
+  let entries: RunnerResult['artifacts'];
+  let failures: PublicationFailure[];
+  const limitations: string[] = [];
+  try {
+    const outcome = artifacts.finalize(runId, evidence.privateArtifacts);
+    entries = outcome.entries;
+    failures = outcome.failures;
+    limitations.push(...outcome.limitations);
+  } catch (error) {
+    entries = [];
+    failures = evidence.privateArtifacts.map((artifact) => ({
+      artifactId: artifact.artifactId,
+      filename: artifact.filename,
+      reason: 'write_failed'
+    }));
+    limitations.push(`Evidence publication failed: ${redactPaths(error)}; no declared artifact was published.`);
+  }
+  const publicationFailures = [...(evidence.publicationFailures ?? []), ...failures];
+  const completeness = applyEvidenceCompleteness(evidence.result.summary, publicationFailures);
   return {
     privateArtifacts: evidence.privateArtifacts,
+    publicationFailures,
     result: {
       ...evidence.result,
       artifacts: entries,
-      limitations: [
-        ...evidence.result.limitations,
-        ...limitations,
-        ...(unpublished
-          ? ['Summary downgraded from pass to inconclusive: native evidence could not be published.']
-          : [])
-      ],
-      summary: unpublished ? { ...evidence.result.summary, result: 'inconclusive' } : evidence.result.summary
+      limitations: [...evidence.result.limitations, ...limitations, ...completeness.limitations],
+      summary: completeness.summary
     }
   };
+}
+
+/** Error text without absolute filesystem paths (results never carry private paths). */
+function redactPaths(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/(^|[\s'"(])\/[^\s'")]*/g, '$1<path>').slice(0, 500);
 }
 
 /** Closes the runner on SIGINT/SIGTERM so owned locks, listeners and native children are cleaned up. */

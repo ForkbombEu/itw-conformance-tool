@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { z } from 'zod';
@@ -15,6 +15,52 @@ export interface PrivateArtifact {
 }
 
 export type ManifestEntry = RunnerResult['artifacts'][number];
+
+/** Why a declared artifact failed its INITIAL publication. */
+export type PublicationFailureReason = 'missing' | 'oversize' | 'unreadable' | 'unsafe_id' | 'write_failed';
+
+/**
+ * Typed internal outcome for one declared artifact that could not be
+ * published. It is an aggregation input, never a wire field.
+ */
+export interface PublicationFailure {
+  artifactId: string;
+  filename: string;
+  reason: PublicationFailureReason;
+}
+
+export interface PublicationOutcome {
+  /** Exactly the entries the persisted manifest advertises (computed hash/size). */
+  entries: ManifestEntry[];
+  /** Every declared artifact of this call that was not published. */
+  failures: PublicationFailure[];
+  /** One human-readable limitation per failure. */
+  limitations: string[];
+}
+
+/** Reads a worker-produced source file. Production uses the real filesystem. */
+export type ArtifactSourceReader = (path: string) => Buffer;
+
+export interface ArtifactStoreOptions {
+  /** Internal test-only seam for the source read of initial publication. */
+  readSource?: ArtifactSourceReader;
+}
+
+export function publicationFailureLimitation(failure: PublicationFailure): string {
+  const name = `Evidence artifact '${failure.filename}'`;
+  switch (failure.reason) {
+    case 'missing':
+      return `${name} is missing and was not published.`;
+    case 'oversize':
+      return `${name} exceeds the ${MAX_ARTIFACT_BYTES}-byte cap and was not published.`;
+    case 'unreadable':
+      return `${name} could not be read and was not published.`;
+    case 'unsafe_id':
+      return `Artifact '${failure.filename}' has an unsafe ID and was not published.`;
+    case 'write_failed':
+      return `${name} could not be stored and was not published.`;
+  }
+}
 
 /**
  * Explicit, deterministic limits: each artifact is copied (immutable) into the
@@ -68,10 +114,12 @@ export function downloadUrl(runId: string, artifactId: string): string {
  * manifest and re-verify the stored SHA-256, so they survive restarts.
  */
 export class ArtifactStore {
+  private readonly readSource: ArtifactSourceReader;
   private readonly root: string;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: ArtifactStoreOptions = {}) {
     this.root = join(stateDir, 'artifacts');
+    this.readSource = options.readSource ?? ((path) => readFileSync(path));
   }
 
   private runDir(runId: string): string {
@@ -96,45 +144,56 @@ export class ArtifactStore {
   /**
    * The production finalization step: hashes the actual bytes, copies them
    * immutably, publishes the run manifest atomically and returns the exact
-   * public entries. Missing, oversized or unreadable files yield explicit
-   * limitations, never an entry with an empty hash.
+   * public entries. Missing, oversized, unreadable or unstorable files yield
+   * typed failures (plus a limitation each), never an entry with an empty hash
+   * and never an exception for a single file. Only entries the persisted
+   * manifest really advertises are returned.
    */
-  finalize(runId: string, artifacts: readonly PrivateArtifact[]): { entries: ManifestEntry[]; limitations: string[] } {
+  finalize(runId: string, artifacts: readonly PrivateArtifact[]): PublicationOutcome {
     const dir = this.runDir(runId);
     const filesDir = join(dir, 'files');
     const existing = this.readManifest(runId);
-    const stored: StoredManifest['entries'] = existing ? [...existing.entries] : [];
-    const limitations: string[] = [];
+    const published: StoredManifest['entries'] = existing ? [...existing.entries] : [];
+    const copied: StoredManifest['entries'] = [];
+    const failures: PublicationFailure[] = [];
+    const fail = (artifact: PrivateArtifact, reason: PublicationFailureReason): void => {
+      failures.push({ artifactId: artifact.artifactId, filename: artifact.filename, reason });
+    };
 
     for (const artifact of artifacts) {
       if (!isSafeArtifactId(artifact.artifactId)) {
-        limitations.push(`Artifact '${artifact.filename}' has an unsafe ID and was not published.`);
+        fail(artifact, 'unsafe_id');
         continue;
       }
-      if (stored.some((entry) => entry.artifact_id === artifact.artifactId)) continue; // immutable once published
+      const known = (entry: StoredManifest['entries'][number]): boolean => entry.artifact_id === artifact.artifactId;
+      if (published.some(known) || copied.some(known)) continue; // immutable once published
       if (!existsSync(artifact.path)) {
-        limitations.push(`Evidence artifact '${artifact.filename}' is missing and was not published.`);
-        continue;
-      }
-      const size = statSync(artifact.path).size;
-      if (size > MAX_ARTIFACT_BYTES) {
-        limitations.push(
-          `Evidence artifact '${artifact.filename}' (${size} bytes) exceeds the ${MAX_ARTIFACT_BYTES}-byte cap and was not published.`
-        );
+        fail(artifact, 'missing');
         continue;
       }
       let content: Buffer;
       try {
-        content = readFileSync(artifact.path);
+        if (statSync(artifact.path).size > MAX_ARTIFACT_BYTES) {
+          fail(artifact, 'oversize');
+          continue;
+        }
+        content = this.readSource(artifact.path);
       } catch {
-        limitations.push(`Evidence artifact '${artifact.filename}' could not be read and was not published.`);
+        fail(artifact, 'unreadable');
         continue;
       }
-      mkdirSync(filesDir, { recursive: true });
-      const target = join(filesDir, artifact.artifactId);
-      writeFileSync(`${target}.tmp`, content, { mode: 0o600 });
-      renameSync(`${target}.tmp`, target);
-      stored.push({
+      if (content.length > MAX_ARTIFACT_BYTES) {
+        fail(artifact, 'oversize');
+        continue;
+      }
+      try {
+        mkdirSync(filesDir, { recursive: true });
+        writeAtomically(join(filesDir, artifact.artifactId), content);
+      } catch {
+        fail(artifact, 'write_failed');
+        continue;
+      }
+      copied.push({
         artifact_id: artifact.artifactId,
         filename: artifact.filename,
         mime_type: artifact.mimeType,
@@ -143,15 +202,25 @@ export class ArtifactStore {
       });
     }
 
-    if (stored.length > 0) {
-      mkdirSync(dir, { recursive: true });
-      const manifest: StoredManifest = { entries: stored, run_id: runId };
-      const path = join(dir, 'manifest.json');
-      writeFileSync(`${path}.tmp`, JSON.stringify(manifest, null, 2), { mode: 0o600 });
-      renameSync(`${path}.tmp`, path);
+    if (copied.length > 0) {
+      const manifest: StoredManifest = { entries: [...published, ...copied], run_id: runId };
+      try {
+        writeAtomically(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+        published.push(...copied);
+      } catch {
+        // Without a manifest the copies are unreachable: never advertise them.
+        for (const entry of copied) {
+          failures.push({ artifactId: entry.artifact_id, filename: entry.filename, reason: 'write_failed' });
+          removeQuietly(join(filesDir, entry.artifact_id));
+        }
+      }
     }
 
-    return { entries: stored.map((entry) => toPublicEntry(runId, entry)), limitations };
+    return {
+      entries: published.map((entry) => toPublicEntry(runId, entry)),
+      failures,
+      limitations: failures.map(publicationFailureLimitation)
+    };
   }
 
   /** Manifest entries of a run, as published in its RunnerResult. */
@@ -176,6 +245,27 @@ export class ArtifactStore {
       );
     }
     return { content, entry: toPublicEntry(runId, entry) };
+  }
+}
+
+/** Writes via a private temp file and rename; a failed write leaves no temp file behind. */
+function writeAtomically(target: string, content: Buffer | string): void {
+  const temp = `${target}.tmp`;
+  try {
+    writeFileSync(temp, content, { mode: 0o600 });
+    renameSync(temp, target);
+  } catch (error) {
+    removeQuietly(temp);
+    throw error;
+  }
+}
+
+/** Best-effort cleanup of an unpublished file; a path that is not a removable file is left alone. */
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // e.g. a directory squatting on the path: nothing advertises it.
   }
 }
 

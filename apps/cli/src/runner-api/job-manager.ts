@@ -18,9 +18,9 @@ import {
   removeNativeChildMarker,
   type NativeChildMarker
 } from './native-child-marker.js';
-import { summarizeWithLimitations } from './summarize.js';
+import { applyEvidenceCompleteness, summarizeWithLimitations } from './summarize.js';
 
-import type { PrivateArtifact } from './artifacts.js';
+import type { PrivateArtifact, PublicationFailure } from './artifacts.js';
 import type { PendingInteraction, RunRequest, RunSnapshot, RunnerResult, RunStatus } from './contract.js';
 import type { AckOutcome } from '@itw-conformance-tool/utils';
 
@@ -111,28 +111,42 @@ function buildErrorResult(run: StoredRun, reason: string, status: RunStatus, fin
 /**
  * Forces the lifecycle status onto worker evidence while keeping its raw
  * assertions/artifacts, and recomputes the summary conservatively when the
- * lifecycle differs from what the worker reported.
+ * lifecycle differs from what the worker reported. Evidence completeness (a
+ * declared artifact that failed initial publication) is a separate input
+ * applied last, so no recomputation can turn that decision back into pass.
  */
 function withLifecycle(
   result: RunnerResult,
   status: RunStatus,
   finishedAt: string,
-  extraLimitations: string[]
+  extraLimitations: string[],
+  publicationFailures: readonly PublicationFailure[] = []
 ): RunnerResult {
   const execution = { ...result.execution, finished_at: result.execution.finished_at ?? finishedAt, status };
-  if (result.execution.status === status && extraLimitations.length === 0) return { ...result, execution };
-  const recomputed = summarizeWithLimitations(execution, result.native);
+  const unchanged = result.execution.status === status && extraLimitations.length === 0;
+  if (unchanged && publicationFailures.length === 0) return { ...result, execution };
+  const recomputed = unchanged
+    ? { limitations: [], summary: result.summary }
+    : summarizeWithLimitations(execution, result.native);
+  const completeness = applyEvidenceCompleteness(recomputed.summary, publicationFailures);
   return {
     ...result,
     execution,
-    limitations: [...new Set([...result.limitations, ...extraLimitations, ...recomputed.limitations])],
-    summary: recomputed.summary
+    limitations: [
+      ...new Set([...result.limitations, ...extraLimitations, ...recomputed.limitations, ...completeness.limitations])
+    ],
+    summary: completeness.summary
   };
 }
 
 export interface ExecutionEvidence {
   /** Raw evidence files at private paths; the composition publishes them as artifacts. */
   privateArtifacts: PrivateArtifact[];
+  /**
+   * Declared artifacts whose initial publication failed (typed internal
+   * aggregation input, never serialized). Absent means none are known.
+   */
+  publicationFailures?: readonly PublicationFailure[];
   result: RunnerResult;
 }
 
@@ -293,7 +307,7 @@ export class JobManager {
     if (reason) {
       status = LIFECYCLE_BY_REASON[reason];
       result = evidence
-        ? withLifecycle(evidence.result, status, finishedAt, [REASON_LIMITATION[reason]])
+        ? withLifecycle(evidence.result, status, finishedAt, [REASON_LIMITATION[reason]], evidence.publicationFailures)
         : buildErrorResult(
             current,
             failure === undefined ? REASON_LIMITATION[reason] : `${REASON_LIMITATION[reason]} ${errorMessage(failure)}`,
@@ -307,7 +321,8 @@ export class JobManager {
         evidence.result,
         status,
         finishedAt,
-        status === reported ? [] : [`Unknown worker execution status '${reported}' treated as error.`]
+        status === reported ? [] : [`Unknown worker execution status '${reported}' treated as error.`],
+        evidence.publicationFailures
       );
     } else {
       status = 'error';
@@ -458,6 +473,8 @@ export class JobManager {
     for (const run of stranded) {
       const reason = `Run interrupted: the runner restarted while the run was ${run.status}.`;
       const extra = markerNotes.get(run.runId);
+      // A stored stranded result carries no typed publication input, but the
+      // forced `error` status can never recompute to pass.
       const result = run.result
         ? withLifecycle(run.result, 'error', finishedAt, extra ? [reason, extra] : [reason])
         : buildErrorResult(run, extra ? `${reason} ${extra}` : reason, 'error', finishedAt);

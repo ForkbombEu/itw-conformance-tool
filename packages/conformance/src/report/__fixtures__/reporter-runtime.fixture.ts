@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 // - empty: no tests at all
 // - afterall-error: every test passes, then the group's afterAll throws
 // - unhandled: every test passes, but an unhandled rejection escapes
+// - pass: every test passes (scenario matcher + generic check), suite PASSED
 const mode = process.env.ITWCT_REPORTER_FIXTURE_MODE ?? 'mixed';
 
 if (mode === 'mixed') {
@@ -56,6 +57,20 @@ if (mode === 'unhandled') {
   describe('Scenario group with an escaped rejection', { meta: { itwctScenarioId: 'WP_RP_HAPPY' } }, () => {
     test('[WP_082]: passes but leaks a rejection', () => {
       void Promise.reject(new Error('deliberate unhandled rejection'));
+      expect(true).toBe(true);
+    });
+  });
+}
+
+if (mode === 'pass') {
+  describe('Fixture presentation phase', () => {
+    describe('Scenario group', { meta: { itwctScenarioId: 'WP_RP_HAPPY' } }, () => {
+      test('[WP_082]: bracketed requirement passes', () => {
+        expect(1 + 1).toBe(2);
+      });
+    });
+
+    test('generic cleanup check passes', () => {
       expect(true).toBe(true);
     });
   });

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { finalizeEvidence, serveRunner } from '../../commands/serveRunner.js';
-import { ArtifactStore } from '../../runner-api/artifacts.js';
+import { ArtifactStore, type PrivateArtifact } from '../../runner-api/artifacts.js';
+import { runnerResultSchema, type RunnerResult } from '../../runner-api/contract.js';
 import { createOperatorFixture, type OperatorFixture, writeProfilesFile } from './helpers/operator-fixture.js';
 
 let tempDir: string;
@@ -159,5 +160,105 @@ describe('finalizeEvidence (second review finding 4)', () => {
     expect(evidence.result.artifacts).toEqual([]);
     expect(evidence.result.summary.result).toBe('inconclusive');
     expect(evidence.result.limitations.join(' ')).toContain('missing');
+  });
+});
+
+// UNIT (R17): the production finalizer with the REAL artifact store; the worker
+// evidence is a typed fixture, not a native run.
+function passEvidence(runId: string, privateArtifacts: PrivateArtifact[], overrides: Partial<RunnerResult> = {}) {
+  const result: RunnerResult = {
+    artifacts: [],
+    category: 'presentation',
+    contract_version: '1.0',
+    engine: { fork_repository: 'x', id: 'pagopa-itwct', revision: 'unknown', upstream_repository: 'x', version: 'x' },
+    execution: { finished_at: '2026-01-01T00:00:01Z', started_at: '2026-01-01T00:00:00Z', status: 'completed' },
+    limitations: ['engine.revision is unknown: no trusted build/source revision was supplied (ITWCT_SOURCE_REVISION).'],
+    native: {
+      assertions: [
+        {
+          ancestor_titles: [],
+          assertion_id: 'a0001',
+          file: 'f.ts',
+          full_title: 'x',
+          native_status: 'PASS',
+          phase: 'presentation'
+        }
+      ],
+      coverage_mode: 'interoperability',
+      native_suite_status: 'PASSED',
+      scenario_outcomes: [],
+      sessions: []
+    },
+    profile_id: 'test',
+    run_id: runId,
+    selection: { ids: ['WP_RP_HAPPY'] },
+    summary: { assertion_count: 1, native_failed_assertion_count: 0, result: 'pass' },
+    target: { actor_name: 'w', actor_type: 'wallet' },
+    ...overrides
+  };
+  return { privateArtifacts, result };
+}
+
+function declaredAt(path: string): PrivateArtifact {
+  return { artifactId: 'native-results', filename: 'native-results.json', mimeType: 'application/json', path };
+}
+
+describe('finalizeEvidence publication outcome (R17, UNIT)', () => {
+  it('carries the typed publication failure as an internal aggregation input, not a wire field', () => {
+    const evidence = finalizeEvidence(
+      new ArtifactStore(join(tempDir, 'state')),
+      'run-missing',
+      passEvidence('run-missing', [declaredAt(join(tempDir, 'missing.json'))])
+    );
+    expect(evidence.publicationFailures).toEqual([
+      { artifactId: 'native-results', filename: 'native-results.json', reason: 'missing' }
+    ]);
+    expect(evidence.result.summary.result).toBe('inconclusive');
+    expect(evidence.result.native.assertions.map((a) => a.native_status)).toEqual(['PASS']);
+    expect(evidence.result.native.native_suite_status).toBe('PASSED');
+    expect(evidence.result.execution.status).toBe('completed');
+    expect(runnerResultSchema.safeParse(evidence.result).success).toBe(true);
+    expect(JSON.stringify(evidence.result)).not.toContain('publicationFailures');
+  });
+
+  it('a benign limitation alone (unknown source revision) with a published artifact keeps a real pass', () => {
+    const path = join(tempDir, 'native.json');
+    writeFileSync(path, '{"ok":true}');
+    const evidence = finalizeEvidence(
+      new ArtifactStore(join(tempDir, 'state')),
+      'run-ok',
+      passEvidence('run-ok', [declaredAt(path)])
+    );
+    expect(evidence.publicationFailures ?? []).toEqual([]);
+    expect(evidence.result.summary.result).toBe('pass');
+    expect(evidence.result.artifacts).toHaveLength(1);
+    expect(evidence.result.limitations.join(' ')).toContain('engine.revision is unknown');
+  });
+
+  it('a native fail with a missing artifact stays fail (no invented downgrade/upgrade)', () => {
+    const evidence = finalizeEvidence(
+      new ArtifactStore(join(tempDir, 'state')),
+      'run-fail',
+      passEvidence('run-fail', [declaredAt(join(tempDir, 'missing.json'))], {
+        summary: { assertion_count: 1, native_failed_assertion_count: 1, result: 'fail' }
+      })
+    );
+    expect(evidence.result.summary.result).toBe('fail');
+    expect(evidence.publicationFailures?.map((f) => f.reason)).toEqual(['missing']);
+  });
+
+  it('an exception from the publication path yields an honest readable result, keeping native data', () => {
+    // An unsafe run ID makes the real store throw before any copy.
+    const evidence = finalizeEvidence(
+      new ArtifactStore(join(tempDir, 'state')),
+      'bad/run',
+      passEvidence('bad/run', [declaredAt(join(tempDir, 'missing.json'))])
+    );
+    expect(evidence.result.summary.result).toBe('inconclusive');
+    expect(evidence.result.native.assertions).toHaveLength(1);
+    expect(evidence.result.artifacts).toEqual([]);
+    expect(evidence.publicationFailures?.map((f) => f.reason)).toEqual(['write_failed']);
+    expect(evidence.result.limitations.join(' ')).toContain('Unsafe run ID');
+    expect(runnerResultSchema.safeParse(evidence.result).success).toBe(true);
   });
 });
