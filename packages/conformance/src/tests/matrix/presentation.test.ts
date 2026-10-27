@@ -374,7 +374,7 @@ describe('Test Cases for Presentation Phase', () => {
   // negative cases (WP_081, WP_085, WP_086, WP_087, WP_090, WP_091a, WP_094a) and
   // the UI-only cases (WP_088, WP_089, WP_089a, WP_089b) require dedicated
   // unhappy-path scenarios and are intentionally excluded.
-  registerScenario(wpRpHappyScenario, 'Happy path — full remote presentation flow', () => {
+  scenarioDescribe(wpRpHappyScenario)('Happy path — full remote presentation flow', () => {
     let outcome: ScenarioOutcome;
     let events: ObservedEvent[];
 
