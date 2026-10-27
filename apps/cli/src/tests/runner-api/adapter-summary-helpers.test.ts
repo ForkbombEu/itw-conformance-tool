@@ -62,7 +62,7 @@ afterEach(() => {
   Reflect.deleteProperty(process.env, 'CREDIMI_RUNNER_TOKEN');
 });
 
-describe('Real composition — producer → adapter → summarizer → API', () => {
+describe('Helper-level adapter/summarizer checks (NOT production composition; see production-composition.test.ts)', () => {
   it('failed assertion stays fail through full chain', async () => {
     const resultsDir = join(dir, 'results');
     mkdirSync(resultsDir, { recursive: true });

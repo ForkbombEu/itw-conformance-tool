@@ -20,6 +20,21 @@ const CONTRACT_VERSION = '1.0';
 export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
   const app = Fastify({ bodyLimit: JSON_LIMIT });
 
+  // Body-less POSTs (cancel, cancel-by-key) are valid even when a client sends
+  // `Content-Type: application/json`; malformed JSON stays a 400.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    const text = typeof body === 'string' ? body : body.toString('utf-8');
+    if (text.trim() === '') {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(text));
+    } catch {
+      done(invalidRequest('Request body is not valid JSON'), undefined);
+    }
+  });
+
   // Auth middleware for /v1 routes
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (req.url === '/healthz') return;
@@ -145,6 +160,13 @@ export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
   app.setErrorHandler((error: unknown, _req: FastifyRequest, reply: FastifyReply) => {
     if (error instanceof RunnerError) {
       return reply.status(error.httpStatus).send({ error: { code: error.code, message: error.message } });
+    }
+    // Framework-level client errors (body limit, bad content type) are 4xx, not 500.
+    const statusCode = (error as { statusCode?: unknown }).statusCode;
+    if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+      return reply
+        .status(statusCode)
+        .send({ error: { code: 'INVALID_REQUEST', message: (error as Error).message ?? 'Invalid request' } });
     }
     return reply.status(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
   });

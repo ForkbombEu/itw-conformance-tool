@@ -169,3 +169,26 @@ describe('artifacts', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('body-less POST with a JSON content type', () => {
+  it('cancel accepts an empty body sent as application/json (was a 500)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/runs/nonexistent/cancel',
+      headers: { ...auth(), 'content-type': 'application/json' },
+      payload: ''
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('NOT_FOUND');
+  });
+
+  it('malformed JSON is a 400, not a 500', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/runs',
+      headers: { ...auth(), 'content-type': 'application/json', 'idempotency-key': 'bad-json' },
+      payload: '{"truncated":'
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});

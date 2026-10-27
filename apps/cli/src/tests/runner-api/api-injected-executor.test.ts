@@ -73,7 +73,7 @@ afterEach(() => {
   Reflect.deleteProperty(process.env, 'CREDIMI_RUNNER_TOKEN');
 });
 
-describe('Acceptance — full API/job/export integration', () => {
+describe('HTTP API + JobManager with an injected executor (unit scope, NOT production composition)', () => {
   it('start run → export → artifact → replay', async () => {
     let spawnCount = 0;
     const execute: ExecuteFn = async (ctx) => {
