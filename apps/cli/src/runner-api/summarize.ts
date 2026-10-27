@@ -4,85 +4,91 @@ type Native = RunnerResult['native'];
 type Execution = RunnerResult['execution'];
 type Summary = RunnerResult['summary'];
 
-export function summarizeResult(execution: Execution, native: Native): Summary {
+export interface SummaryContext {
+  /**
+   * assertion_id → protocol-observed scenario ID, or null for a generic check
+   * outside any scenario group. A missing map or entry means the association
+   * is unknown, which is handled conservatively.
+   */
+  assertionScenarios?: ReadonlyMap<string, null | string>;
+}
+
+export interface SummaryWithLimitations {
+  limitations: string[];
+  summary: Summary;
+}
+
+/**
+ * Aggregates native data into the conservative v1.0 summary:
+ * - zero assertions never pass (not_tested);
+ * - an explicit scenario FAIL, or a FAIL assertion known to be independent of
+ *   every INCONCLUSIVE scenario, establishes fail;
+ * - INCONCLUSIVE plus the strict-PASS matcher failures of that same scenario
+ *   stays inconclusive (raw failed counts preserved);
+ * - with unknown association, INCONCLUSIVE stays inconclusive with a limitation;
+ * - any non-completed or unknown execution status cannot pass (partial).
+ */
+export function summarizeWithLimitations(
+  execution: Execution,
+  native: Native,
+  context: SummaryContext = {}
+): SummaryWithLimitations {
   const assertionCount = native.assertions.length;
-  const nativeFailedCount = native.assertions.filter(
-    (a: Native['assertions'][number]) => a.native_status === 'FAIL'
-  ).length;
-  const hasNotReached = native.assertions.some((a: Native['assertions'][number]) => a.native_status === 'NOT_REACHED');
-  const scenarioFail = native.scenario_outcomes.some((s: Native['scenario_outcomes'][number]) => s.verdict === 'FAIL');
-  const scenarioInconclusive = native.scenario_outcomes.some(
-    (s: Native['scenario_outcomes'][number]) => s.verdict === 'INCONCLUSIVE'
+  const failed = native.assertions.filter((a) => a.native_status === 'FAIL');
+  const nativeFailedCount = failed.length;
+  const hasNotReached = native.assertions.some((a) => a.native_status === 'NOT_REACHED');
+  const scenarioFail = native.scenario_outcomes.some((s) => s.verdict === 'FAIL');
+  const inconclusiveScenarios = new Set(
+    native.scenario_outcomes.filter((s) => s.verdict === 'INCONCLUSIVE').map((s) => s.scenario_id)
   );
+  const limitations: string[] = [];
+  const summary = (result: Summary['result']): SummaryWithLimitations => ({
+    limitations,
+    summary: { assertion_count: assertionCount, native_failed_assertion_count: nativeFailedCount, result }
+  });
 
-  // Rule 5: zero assertions → not_tested
   if (assertionCount === 0) {
-    return {
-      assertion_count: 0,
-      native_failed_assertion_count: 0,
-      result: 'not_tested'
-    };
+    limitations.push('No native assertions were collected; the run cannot be reported as tested.');
+    return summary('not_tested');
   }
 
-  // Explicit scenario FAIL → fail (dominates)
-  if (scenarioFail) {
-    return {
-      assertion_count: assertionCount,
-      native_failed_assertion_count: nativeFailedCount,
-      result: 'fail'
-    };
+  if (scenarioFail) return summary('fail');
+
+  if (inconclusiveScenarios.size > 0) {
+    let unknownAssociation = 0;
+    let independentFailures = 0;
+    for (const assertion of failed) {
+      const scenarioId = context.assertionScenarios?.get(assertion.assertion_id);
+      if (scenarioId === undefined) unknownAssociation++;
+      else if (scenarioId === null || !inconclusiveScenarios.has(scenarioId)) independentFailures++;
+    }
+
+    if (independentFailures > 0) return summary('fail');
+
+    if (unknownAssociation > 0) {
+      limitations.push(
+        `${unknownAssociation} failed native assertion(s) could not be associated with a scenario; INCONCLUSIVE is kept and the raw failed count is preserved.`
+      );
+    } else if (nativeFailedCount > 0) {
+      limitations.push(
+        `${nativeFailedCount} failed native assertion(s) are strict-PASS matchers of INCONCLUSIVE scenario(s): ${[...inconclusiveScenarios].join(', ')}.`
+      );
+    }
+    return summary('inconclusive');
   }
 
-  // INCONCLUSIVE scenario: stays inconclusive even with failed assertions
-  if (scenarioInconclusive) {
-    return {
-      assertion_count: assertionCount,
-      native_failed_assertion_count: nativeFailedCount,
-      result: 'inconclusive'
-    };
+  if (nativeFailedCount > 0) return summary('fail');
+
+  if (execution.status !== 'completed') {
+    limitations.push(`Execution ended with status '${execution.status}'; only partial evidence is available.`);
+    return summary('partial');
   }
 
-  // Failed assertion without INCONCLUSIVE → fail
-  if (nativeFailedCount > 0) {
-    return {
-      assertion_count: assertionCount,
-      native_failed_assertion_count: nativeFailedCount,
-      result: 'fail'
-    };
-  }
+  if (hasNotReached) return summary('partial');
 
-  // Incomplete execution (cancel/timeout/error) with some assertions → partial
-  const incompleteStatuses = ['cancelled', 'error', 'timed_out'];
-  if (incompleteStatuses.includes(execution.status)) {
-    return {
-      assertion_count: assertionCount,
-      native_failed_assertion_count: nativeFailedCount,
-      result: 'partial'
-    };
-  }
+  return summary('pass');
+}
 
-  // NOT_REACHED with some executed assertions → partial (rule 5)
-  if (hasNotReached) {
-    return {
-      assertion_count: assertionCount,
-      native_failed_assertion_count: nativeFailedCount,
-      result: 'partial'
-    };
-  }
-
-  // Rule 3: INCONCLUSIVE scenario without associated failure → inconclusive
-  if (scenarioInconclusive) {
-    return {
-      assertion_count: assertionCount,
-      native_failed_assertion_count: nativeFailedCount,
-      result: 'inconclusive'
-    };
-  }
-
-  // Rule 5: complete, nonempty, all passed → pass
-  return {
-    assertion_count: assertionCount,
-    native_failed_assertion_count: nativeFailedCount,
-    result: 'pass'
-  };
+export function summarizeResult(execution: Execution, native: Native, context: SummaryContext = {}): Summary {
+  return summarizeWithLimitations(execution, native, context).summary;
 }

@@ -167,8 +167,10 @@ function scenarioDescribe(definition: ProtocolObservedScenarioDefinition): (titl
   return (title: string, body: () => void) => {
     registerSelectedScenario(
       { automated: isAutomated, selected: isSelected(definition) },
-      () => describe(title, body),
-      () => describe.skip(title, body)
+      // The scenario ID meta lets the reporter associate each assertion
+      // occurrence with this protocol-observed scenario's native verdict.
+      () => describe(title, { meta: { itwctScenarioId: definition.id } }, body),
+      () => describe.skip(title, { meta: { itwctScenarioId: definition.id } }, body)
     );
   };
 }

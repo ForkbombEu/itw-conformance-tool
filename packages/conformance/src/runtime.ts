@@ -191,9 +191,11 @@ export type { ArtifactValidationResult } from './verdict/rules.js';
 export { renderPdf } from './report/pdf.js';
 export {
   buildNativeExport,
+  NATIVE_EXPORT_FILENAME,
   writeNativeExport,
   type NativeAssertion,
-  type NativeExport
+  type NativeExport,
+  type NativeExportStatus
 } from './report/native-export.js';
 export { extractDescription, extractRequirementId } from './report/requirement-id.js';
 export { getLatestSessionId, getSession, listSessions } from './report/session-store.js';

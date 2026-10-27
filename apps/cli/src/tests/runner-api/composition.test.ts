@@ -229,7 +229,10 @@ describe('Real composition — producer → adapter → summarizer → API', () 
   it('stale export rejected', async () => {
     const { validateAndAdaptNativeExport } = await import('../../runner-api/native-result-adapter.js');
     try {
-      validateAndAdaptNativeExport(makeProducerExport({ run_id: 'OLD' }), { expectedRunId: 'NEW' });
+      validateAndAdaptNativeExport(makeProducerExport({ run_id: 'OLD' }), {
+        expectedPhase: 'presentation',
+        expectedRunId: 'NEW'
+      });
       expect.unreachable('should have thrown');
     } catch (e) {
       expect((e as { code?: string }).code).toBe('RUN_ID_MISMATCH');

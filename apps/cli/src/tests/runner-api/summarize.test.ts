@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { summarizeResult } from '../../runner-api/summarize.js';
+import { summarizeResult, summarizeWithLimitations } from '../../runner-api/summarize.js';
 
 import type { RunnerResult } from '../../runner-api/contract.js';
 
@@ -9,6 +9,7 @@ type NativeAssertion = RunnerResult['native']['assertions'][number];
 function makeAssertion(overrides: Partial<NativeAssertion> = {}): NativeAssertion {
   return {
     ancestor_titles: [],
+    assertion_id: 'a0001',
     file: 'test.ts',
     full_title: 'test',
     native_status: 'PASS',
@@ -224,5 +225,91 @@ describe('summarizeResult — aggregation table', () => {
     });
     expect(s.native_failed_assertion_count).toBe(0);
     expect(s.result).toBe('inconclusive');
+  });
+});
+
+describe('summarizeWithLimitations — INCONCLUSIVE association', () => {
+  const nativeWith = (
+    assertions: NativeAssertion[],
+    outcomes: RunnerResult['native']['scenario_outcomes']
+  ): RunnerResult['native'] => ({
+    assertions,
+    coverage_mode: 'interoperability',
+    native_suite_status: 'FAILED',
+    scenario_outcomes: outcomes,
+    sessions: []
+  });
+
+  it('INCONCLUSIVE + its own strict matcher FAIL stays inconclusive with raw failed count', () => {
+    const { limitations, summary } = summarizeWithLimitations(
+      completed,
+      nativeWith(
+        [makeAssertion({ assertion_id: 'a1', native_status: 'FAIL' }), makeAssertion({ assertion_id: 'a2' })],
+        [{ scenario_id: 'WP_RP_HAPPY', verdict: 'INCONCLUSIVE' }]
+      ),
+      {
+        assertionScenarios: new Map([
+          ['a1', 'WP_RP_HAPPY'],
+          ['a2', null]
+        ])
+      }
+    );
+    expect(summary.result).toBe('inconclusive');
+    expect(summary.native_failed_assertion_count).toBe(1);
+    expect(limitations.join(' ')).toContain('strict-PASS matchers of INCONCLUSIVE');
+  });
+
+  it('an independent generic FAIL is not erased by an unrelated INCONCLUSIVE scenario', () => {
+    const { summary } = summarizeWithLimitations(
+      completed,
+      nativeWith(
+        [
+          makeAssertion({ assertion_id: 'a1', native_status: 'FAIL' }),
+          makeAssertion({ assertion_id: 'a2', native_status: 'FAIL' })
+        ],
+        [{ scenario_id: 'WP_RP_HAPPY', verdict: 'INCONCLUSIVE' }]
+      ),
+      {
+        assertionScenarios: new Map([
+          ['a1', 'WP_RP_HAPPY'],
+          ['a2', null]
+        ])
+      }
+    );
+    expect(summary.result).toBe('fail');
+    expect(summary.native_failed_assertion_count).toBe(2);
+  });
+
+  it('a FAIL belonging to a PASS scenario establishes fail alongside another INCONCLUSIVE scenario', () => {
+    const { summary } = summarizeWithLimitations(
+      completed,
+      nativeWith(
+        [makeAssertion({ assertion_id: 'a1', native_status: 'FAIL' })],
+        [
+          { scenario_id: 'S_INC', verdict: 'INCONCLUSIVE' },
+          { scenario_id: 'S_PASS', verdict: 'PASS' }
+        ]
+      ),
+      { assertionScenarios: new Map([['a1', 'S_PASS']]) }
+    );
+    expect(summary.result).toBe('fail');
+  });
+
+  it('unknown association keeps INCONCLUSIVE with a limitation', () => {
+    const { limitations, summary } = summarizeWithLimitations(
+      completed,
+      nativeWith(
+        [makeAssertion({ assertion_id: 'a1', native_status: 'FAIL' })],
+        [{ scenario_id: 'WP_RP_HAPPY', verdict: 'INCONCLUSIVE' }]
+      )
+    );
+    expect(summary.result).toBe('inconclusive');
+    expect(summary.native_failed_assertion_count).toBe(1);
+    expect(limitations.join(' ')).toContain('could not be associated');
+  });
+
+  it('an unknown execution status never falls through to pass', () => {
+    const { summary } = summarizeWithLimitations({ ...completed, status: 'weird' }, nativeWith([makeAssertion()], []));
+    expect(summary.result).toBe('partial');
   });
 });

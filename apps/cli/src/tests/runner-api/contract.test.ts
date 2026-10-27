@@ -274,6 +274,7 @@ describe('runnerResultSchema', () => {
         assertions: [
           {
             ancestor_titles: ['Suite'],
+            assertion_id: 'a0001',
             file: 'test.ts',
             full_title: 'CI_001: test',
             native_status: 'PASS',
@@ -317,6 +318,7 @@ describe('runnerResultSchema', () => {
         assertions: [
           {
             ancestor_titles: [],
+            assertion_id: 'a0001',
             file: 'test.ts',
             full_title: 'generic smoke test',
             native_status: 'PASS',

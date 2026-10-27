@@ -2,8 +2,9 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { validateAndAdaptNativeExport, type AdaptedNativeExport } from './native-result-adapter.js';
 import { assertSelectionAllowed } from './profiles.js';
-import { summarizeResult } from './summarize.js';
+import { summarizeWithLimitations } from './summarize.js';
 
 import type { RunRequest, RunnerResult } from './contract.js';
 import type { Profile } from './profiles.js';
@@ -51,6 +52,11 @@ function resolveCliEntry(): string {
     return process.argv[1] ?? 'node';
   }
 }
+
+/** File name the native ConformanceReporter publishes into ITWCT_RESULTS_DIR. */
+export const NATIVE_EXPORT_FILENAME = 'native-results.json';
+
+const UNKNOWN_REVISION_LIMITATION = 'engine.revision is unknown: no trusted build/source revision was supplied.';
 
 const ENGINE_INFO = {
   fork_repository: 'https://github.com/ForkbombEu/itw-conformance-tool',
@@ -139,56 +145,72 @@ export function createNativeExecutor(
 
     const finishedAt = new Date().toISOString();
 
-    // Read native export
-    const exportPath = join(resultsDir, 'native-results.json');
-    let nativeExport: {
-      assertions: RunnerResult['native']['assertions'];
-      session_id: string;
-      status: string;
-    } | null = null;
-
-    if (existsSync(exportPath)) {
-      try {
-        nativeExport = JSON.parse(readFileSync(exportPath, 'utf-8'));
-      } catch {
-        nativeExport = null;
-      }
-    }
-
-    if (!nativeExport) {
+    // Read the native export the REAL reporter wrote, validate it against the
+    // producer format and adapt it; never trust or cast unvalidated JSON.
+    const exportPath = join(resultsDir, NATIVE_EXPORT_FILENAME);
+    if (!existsSync(exportPath)) {
       return {
         privateArtifactPaths: [],
-        result: buildErrorResult(runId, request, profile, startedAt, finishedAt, exitCode)
+        result: buildErrorResult(runId, request, profile, startedAt, finishedAt, exitCode, 'Native export is missing')
+      };
+    }
+
+    let adapted: AdaptedNativeExport;
+    try {
+      adapted = validateAndAdaptNativeExport(JSON.parse(readFileSync(exportPath, 'utf-8')), {
+        expectedPhase: profile.category,
+        expectedRunId: runId,
+        notBefore: new Date(startedAt)
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // Keep the raw bytes as evidence even though they were rejected.
+      return {
+        privateArtifactPaths: [exportPath],
+        result: buildErrorResult(
+          runId,
+          request,
+          profile,
+          startedAt,
+          finishedAt,
+          exitCode,
+          `Native export rejected: ${reason}`
+        )
       };
     }
 
     const native: RunnerResult['native'] = {
-      assertions: nativeExport.assertions,
+      assertions: adapted.assertions,
       coverage_mode: profile.coverageMode,
-      native_suite_status: nativeExport.status,
+      native_suite_status: adapted.status,
       scenario_outcomes: [],
-      sessions: [{ id: nativeExport.session_id, status: nativeExport.status }]
+      sessions: [{ id: adapted.sessionId, status: adapted.status }]
     };
 
+    // A readable native suite result was collected: failed assertions are
+    // normal conformance data, not an execution error.
     const execution: RunnerResult['execution'] = {
-      exit_code: exitCode ?? undefined,
+      ...(exitCode === null ? {} : { exit_code: exitCode }),
       finished_at: finishedAt,
       started_at: startedAt,
-      status: exitCode === 0 ? 'completed' : 'completed'
+      status: 'completed'
     };
+
+    const { limitations, summary } = summarizeWithLimitations(execution, native, {
+      assertionScenarios: adapted.assertionScenarios
+    });
 
     // Register native export as artifact
     const artifactId = `${runId}:native-export`;
-    const nativeExportPath = join(resultsDir, 'native-results.json');
 
     return {
-      privateArtifactPaths: [nativeExportPath],
+      privateArtifactPaths: [exportPath],
       result: {
         artifacts: [
           {
             artifact_id: artifactId,
             download_url: `/v1/runs/${runId}/artifacts/${encodeURIComponent(artifactId)}`,
-            filename: 'native-results.json',
+            filename: NATIVE_EXPORT_FILENAME,
             mime_type: 'application/json',
             sha256: '',
             size_bytes: 0
@@ -198,12 +220,16 @@ export function createNativeExecutor(
         contract_version: '1.0',
         engine: { ...ENGINE_INFO, revision: 'unknown', version: '1.0' },
         execution,
-        limitations: [],
+        limitations: [
+          ...limitations,
+          ...adapted.errors.map((message) => `Native error outside test bodies: ${message}`),
+          UNKNOWN_REVISION_LIMITATION
+        ],
         native,
         profile_id: profile.id,
         run_id: runId,
         selection: request.selection,
-        summary: summarizeResult(execution, native),
+        summary,
         target: request.target
       }
     };
@@ -216,7 +242,8 @@ function buildErrorResult(
   profile: Profile,
   startedAt: string,
   finishedAt: string,
-  exitCode: null | number
+  exitCode: null | number,
+  reason: string
 ): RunnerResult {
   return {
     artifacts: [],
@@ -224,13 +251,13 @@ function buildErrorResult(
     contract_version: '1.0',
     engine: { ...ENGINE_INFO, revision: 'unknown', version: '1.0' },
     execution: {
-      error: 'native export missing or corrupt',
-      exit_code: exitCode ?? undefined,
+      error: reason,
+      ...(exitCode === null ? {} : { exit_code: exitCode }),
       finished_at: finishedAt,
       started_at: startedAt,
       status: 'error'
     },
-    limitations: ['Native export was missing or unreadable'],
+    limitations: [reason, UNKNOWN_REVISION_LIMITATION],
     native: {
       assertions: [],
       coverage_mode: profile.coverageMode,

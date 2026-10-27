@@ -1,12 +1,16 @@
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
+import { ConfigIniTemplate } from '@itw-conformance-tool/config';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { nativeAssertionSchema } from '../../runner-api/contract.js';
 import { createNativeExecutor } from '../../runner-api/native-worker.js';
 
-import type { RunRequest } from '../../runner-api/contract.js';
+import type { RunnerResult, RunRequest } from '../../runner-api/contract.js';
 import type { ProcessAdapter, SpawnOptions, SpawnedProcess } from '../../runner-api/native-worker.js';
 import type { Profile } from '../../runner-api/profiles.js';
 
@@ -91,65 +95,185 @@ describe('native-worker — selection rejection', () => {
   });
 });
 
-describe('native-worker — export handling', () => {
-  it('nonzero with export = completed with assertions', async () => {
-    mkdirSync(join(dir, 'results'), { recursive: true });
-    writeFileSync(
-      join(dir, 'results', 'native-results.json'),
-      JSON.stringify({
-        assertions: [
-          {
-            ancestor_titles: [],
-            file: 'test.ts',
-            full_title: 'WP_082: test',
-            native_status: 'PASS',
-            phase: 'presentation',
-            requirement_id: 'WP_082'
-          }
-        ],
-        session_id: 'session-1',
-        status: 'PASSED'
-      })
-    );
-    const { adapter } = makeFakeAdapter(1);
-    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request: makeRequest() });
-    const evidence = await execute({
-      abortSignal: new AbortController().signal,
-      request: makeRequest(),
-      runId: 'run-1',
-      runRoot: dir
-    });
-    expect(evidence.result.execution.status).toBe('completed');
-    expect(evidence.result.native.assertions).toHaveLength(1);
-    expect(evidence.result.native.sessions[0]?.id).toBe('session-1');
+/** Writes a producer-format export as an earlier/other execution would have left it. */
+function writeProducerExport(root: string, overrides: Record<string, unknown> = {}): void {
+  mkdirSync(join(root, 'results'), { recursive: true });
+  const now = new Date().toISOString();
+  writeFileSync(
+    join(root, 'results', 'native-results.json'),
+    JSON.stringify({
+      assertions: [
+        {
+          ancestor_titles: ['Suite'],
+          file: 'test.ts',
+          full_title: 'Suite > [WP_082]: test',
+          native_status: 'PASS',
+          phase: 'presentation',
+          requirement_id: 'WP_082'
+        }
+      ],
+      closedAt: now,
+      phase: 'presentation',
+      run_id: 'run-1',
+      session_id: 'session-1',
+      startedAt: now,
+      status: 'PASSED',
+      ...overrides
+    })
+  );
+}
+
+async function executeWith(exportOverrides: Record<string, unknown> | undefined, exitCode = 0) {
+  const { adapter } = makeFakeAdapter(exitCode);
+  if (exportOverrides) writeProducerExport(dir, exportOverrides);
+  const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request: makeRequest() });
+  return execute({ abortSignal: new AbortController().signal, request: makeRequest(), runId: 'run-1', runRoot: dir });
+}
+
+describe('native-worker — export validation through the actual worker', () => {
+  it('missing export = error, never pass', async () => {
+    const evidence = await executeWith(undefined, 1);
+    expect(evidence.result.execution.status).toBe('error');
+    expect(evidence.result.summary.result).toBe('not_tested');
   });
 
-  it('missing export = error', async () => {
-    const { adapter } = makeFakeAdapter(1);
-    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request: makeRequest() });
-    const evidence = await execute({
-      abortSignal: new AbortController().signal,
-      request: makeRequest(),
-      runId: 'run-1',
-      runRoot: dir
+  it('valid producer export is adapted with assertion_id and raw', async () => {
+    const evidence = await executeWith({});
+    expect(evidence.result.execution.status).toBe('completed');
+    expect(evidence.result.native.assertions[0]?.assertion_id).toBe('a0001');
+    expect(JSON.parse(evidence.result.native.assertions[0]?.raw ?? '{}').requirement_id).toBe('WP_082');
+    expect(evidence.result.summary.result).toBe('pass');
+  });
+
+  it('export from another run (OLD-RUN) is rejected, not accepted into this run', async () => {
+    const evidence = await executeWith({ run_id: 'OLD-RUN' });
+    expect(evidence.result.execution.status).toBe('error');
+    expect(evidence.result.execution.error).toContain("run_id 'OLD-RUN' does not match expected 'run-1'");
+    expect(evidence.result.native.assertions).toEqual([]);
+    expect(evidence.result.summary.result).not.toBe('pass');
+  });
+
+  it('invalid camelCase nativeStatus FAIL is rejected and never becomes pass', async () => {
+    const evidence = await executeWith({
+      assertions: [
+        { ancestorTitles: [], file: 'test.ts', fullTitle: 'WP_082: test', nativeStatus: 'FAIL', phase: 'presentation' }
+      ]
     });
+    expect(evidence.result.execution.status).toBe('error');
+    expect(evidence.result.summary.result).not.toBe('pass');
+    expect(evidence.result.limitations.join(' ')).toContain('producer format');
+  });
+
+  it('unknown native status is rejected', async () => {
+    const evidence = await executeWith({ status: 'MAYBE' });
+    expect(evidence.result.execution.status).toBe('error');
+  });
+
+  it('stale export that started before this execution is rejected', async () => {
+    const stale = new Date(Date.now() - 60_000).toISOString();
+    const evidence = await executeWith({ closedAt: stale, startedAt: stale });
+    expect(evidence.result.execution.status).toBe('error');
+    expect(evidence.result.execution.error).toContain('before this execution started');
+  });
+
+  it('wrong phase (issuance export for a presentation run) is rejected', async () => {
+    const evidence = await executeWith({ phase: 'issuance' });
     expect(evidence.result.execution.status).toBe('error');
   });
 
   it('zero assertions = not_tested', async () => {
-    mkdirSync(join(dir, 'results'), { recursive: true });
-    writeFileSync(
-      join(dir, 'results', 'native-results.json'),
-      JSON.stringify({ assertions: [], session_id: 's1', status: 'PASSED' })
-    );
-    const { adapter } = makeFakeAdapter(0);
-    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request: makeRequest() });
-    const evidence = await execute({
-      abortSignal: new AbortController().signal,
-      request: makeRequest(),
-      runId: 'run-1',
-      runRoot: dir
-    });
+    const evidence = await executeWith({ assertions: [], status: 'INCOMPLETE' });
+    expect(evidence.result.execution.status).toBe('completed');
     expect(evidence.result.summary.result).toBe('not_tested');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Real native reporter: the low-level process boundary runs a REAL Vitest
+// child with the real ConformanceReporter (protocol-free fixture) instead of
+// the CLI. The worker's env (run ID, results dir, data dir, config path) is
+// passed through unchanged, and the worker reads the bytes the reporter wrote.
+// ---------------------------------------------------------------------------
+
+const repoRoot = resolve(import.meta.dirname, '../../../../..');
+const conformanceRoot = join(repoRoot, 'packages/conformance');
+const reporterFixtureConfig = join(conformanceRoot, 'src/report/__fixtures__/reporter-runtime.config.mts');
+const vitestBin = join(dirname(createRequire(import.meta.url).resolve('vitest/package.json')), 'vitest.mjs');
+
+function realReporterAdapter(mode: string): { adapter: ProcessAdapter; envSeen: NodeJS.ProcessEnv[] } {
+  const envSeen: NodeJS.ProcessEnv[] = [];
+  const adapter: ProcessAdapter = {
+    spawn(_command, _args, options) {
+      envSeen.push(options.env);
+      const env: NodeJS.ProcessEnv = { ...options.env, ITWCT_REPORTER_FIXTURE_MODE: mode };
+      for (const key of ['VITEST', 'VITEST_POOL_ID', 'VITEST_WORKER_ID']) delete env[key];
+      return spawn(process.execPath, [vitestBin, 'run', '--config', reporterFixtureConfig], {
+        ...options,
+        cwd: conformanceRoot,
+        env
+      }) as unknown as SpawnedProcess;
+    }
+  };
+  return { adapter, envSeen };
+}
+
+describe('native-worker — real ConformanceReporter child', () => {
+  it('a deliberate native FAIL flows through the actual adapter as completed + fail', async () => {
+    const configPath = join(dir, 'config.ini');
+    writeFileSync(configPath, ConfigIniTemplate, 'utf-8');
+    const profile = { ...makeProfile(), configPath };
+    const { adapter, envSeen } = realReporterAdapter('mixed');
+    const execute = createNativeExecutor({ processAdapter: adapter, profile, request: makeRequest() });
+    const runRoot = join(dir, 'run');
+    mkdirSync(runRoot);
+
+    const evidence = await execute({
+      abortSignal: new AbortController().signal,
+      request: makeRequest(),
+      runId: 'run-real-1',
+      runRoot
+    });
+
+    expect(envSeen[0]?.ITWCT_RUN_ID).toBe('run-real-1');
+    expect(envSeen[0]?.ITWCT_CONFIG_PATH).toBe(configPath);
+    const result = evidence.result;
+    expect(result.execution.status, JSON.stringify(result.limitations)).toBe('completed');
+    expect(result.execution.exit_code).not.toBe(0);
+    expect(result.summary.result).toBe('fail');
+    expect(result.summary.assertion_count).toBe(3);
+    expect(result.summary.native_failed_assertion_count).toBe(1);
+    expect(result.native.assertions.map((a) => a.assertion_id)).toEqual(['a0001', 'a0002', 'a0003']);
+    expect(result.native.assertions.map((a) => a.requirement_id)).toEqual(['WP_082', 'WP_082', undefined]);
+    expect(result.native.native_suite_status).toBe('FAILED');
+    expect(result.native.sessions[0]?.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(result.engine.revision).toBe('unknown');
+    expect(result.limitations.some((l) => l.includes('engine.revision is unknown'))).toBe(true);
+    expect(evidence.privateArtifactPaths[0]).toBe(join(runRoot, 'results', 'native-results.json'));
+    expect(nativeAssertionsAreWireValid(result)).toBe(true);
+  }, 60_000);
+
+  it('a hook error yields a nonpass result through the actual worker', async () => {
+    const configPath = join(dir, 'config.ini');
+    writeFileSync(configPath, ConfigIniTemplate, 'utf-8');
+    const { adapter } = realReporterAdapter('hook-error');
+    const execute = createNativeExecutor({
+      processAdapter: adapter,
+      profile: { ...makeProfile(), configPath },
+      request: makeRequest()
+    });
+    const runRoot = join(dir, 'run');
+    mkdirSync(runRoot);
+    const evidence = await execute({
+      abortSignal: new AbortController().signal,
+      request: makeRequest(),
+      runId: 'run-real-2',
+      runRoot
+    });
+    expect(evidence.result.summary.result).not.toBe('pass');
+    expect(evidence.result.limitations.join(' ')).toContain('deliberate beforeAll failure');
+  }, 60_000);
+});
+
+function nativeAssertionsAreWireValid(result: RunnerResult): boolean {
+  return result.native.assertions.every((assertion) => nativeAssertionSchema.safeParse(assertion).success);
+}

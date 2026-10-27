@@ -133,8 +133,11 @@ const nativeSessionSchema = z.strictObject({
   status: z.string()
 });
 
-const nativeAssertionSchema = z.strictObject({
+// Shared runner v1.0 wire shape of one native assertion occurrence. `raw`
+// carries the producer's own JSON text for diagnostics.
+export const nativeAssertionSchema = z.strictObject({
   ancestor_titles: z.array(z.string()),
+  assertion_id: z.string().min(1),
   credential_configuration_id: z.string().optional(),
   error_message: z.string().optional(),
   file: z.string(),
