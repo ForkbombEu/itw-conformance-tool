@@ -165,6 +165,12 @@ describe('native channel — real session file → HTTP snapshot/ACK → native 
       expect((await ack(handle, runId, interactionId, { driver_status: 'completed' })).status).toBe(409);
       const after = (await (await http(handle, `/v1/runs/${runId}`)).json()) as RunSnapshot;
       expect(after.pending_interactions).toEqual([]);
+      // The cancelled run has a readable, schema-valid envelope (N12).
+      const resultResponse = await http(handle, `/v1/runs/${runId}/result`);
+      expect(resultResponse.status).toBe(200);
+      const result = (await resultResponse.json()) as RunnerResult;
+      expect(result.execution.status).toBe('cancelled');
+      expect(result.summary.result).not.toBe('pass');
     } finally {
       await handle.close();
     }
