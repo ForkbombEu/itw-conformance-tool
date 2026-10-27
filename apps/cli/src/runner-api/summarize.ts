@@ -13,6 +13,32 @@ export interface SummaryContext {
   assertionScenarios?: ReadonlyMap<string, null | string>;
 }
 
+/**
+ * Recovers the assertion → scenario association from each adapted
+ * assertion's `raw` producer JSON (`scenario_id`, absent for generic checks),
+ * so summaries recomputed after cancellation, deadline or restart keep it.
+ * Assertions without readable raw JSON stay unknown.
+ */
+export function assertionScenariosFromRaw(native: Native): Map<string, null | string> {
+  const associations = new Map<string, null | string>();
+  for (const assertion of native.assertions) {
+    if (!assertion.raw) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(assertion.raw);
+    } catch {
+      continue;
+    }
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
+    const scenarioId = (raw as { scenario_id?: unknown }).scenario_id;
+    associations.set(
+      assertion.assertion_id,
+      typeof scenarioId === 'string' && scenarioId.length > 0 ? scenarioId : null
+    );
+  }
+  return associations;
+}
+
 export interface SummaryWithLimitations {
   limitations: string[];
   summary: Summary;
@@ -26,7 +52,9 @@ export interface SummaryWithLimitations {
  * - INCONCLUSIVE plus the strict-PASS matcher failures of that same scenario
  *   stays inconclusive (raw failed counts preserved);
  * - with unknown association, INCONCLUSIVE stays inconclusive with a limitation;
- * - any non-completed or unknown execution status cannot pass (partial).
+ * - any non-completed or unknown execution status cannot pass (partial);
+ * - a native suite that is not PASSED (e.g. INCOMPLETE after hook or
+ *   unhandled errors) cannot pass (partial), even with all tests PASS.
  */
 export function summarizeWithLimitations(
   execution: Execution,
@@ -41,6 +69,7 @@ export function summarizeWithLimitations(
   const inconclusiveScenarios = new Set(
     native.scenario_outcomes.filter((s) => s.verdict === 'INCONCLUSIVE').map((s) => s.scenario_id)
   );
+  const assertionScenarios = context.assertionScenarios ?? assertionScenariosFromRaw(native);
   const limitations: string[] = [];
   const summary = (result: Summary['result']): SummaryWithLimitations => ({
     limitations,
@@ -58,7 +87,7 @@ export function summarizeWithLimitations(
     let unknownAssociation = 0;
     let independentFailures = 0;
     for (const assertion of failed) {
-      const scenarioId = context.assertionScenarios?.get(assertion.assertion_id);
+      const scenarioId = assertionScenarios.get(assertion.assertion_id);
       if (scenarioId === undefined) unknownAssociation++;
       else if (scenarioId === null || !inconclusiveScenarios.has(scenarioId)) independentFailures++;
     }
@@ -85,6 +114,15 @@ export function summarizeWithLimitations(
   }
 
   if (hasNotReached) return summary('partial');
+
+  // Hook/collection/unhandled errors make the native suite INCOMPLETE even
+  // when every executed test passed: that is never a pass.
+  if (native.native_suite_status !== 'PASSED') {
+    limitations.push(
+      `Native suite status is '${native.native_suite_status}' (errors outside test bodies or incomplete execution); the run cannot pass.`
+    );
+    return summary('partial');
+  }
 
   return summary('pass');
 }

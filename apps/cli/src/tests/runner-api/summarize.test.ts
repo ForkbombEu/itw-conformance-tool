@@ -312,4 +312,24 @@ describe('summarizeWithLimitations — INCONCLUSIVE association', () => {
     const { summary } = summarizeWithLimitations({ ...completed, status: 'weird' }, nativeWith([makeAssertion()], []));
     expect(summary.result).toBe('partial');
   });
+
+  it('all PASS assertions with an INCOMPLETE native suite (hook/unhandled error) is partial, not pass', () => {
+    const { limitations, summary } = summarizeWithLimitations(completed, {
+      ...nativeWith([makeAssertion()], []),
+      native_suite_status: 'INCOMPLETE'
+    });
+    expect(summary.result).toBe('partial');
+    expect(limitations.join(' ')).toContain("'INCOMPLETE'");
+  });
+
+  it('association is recovered from the adapted raw producer JSON when no map is supplied', () => {
+    const { summary } = summarizeWithLimitations(
+      completed,
+      nativeWith(
+        [makeAssertion({ assertion_id: 'a1', native_status: 'FAIL', raw: JSON.stringify({ full_title: 'generic' }) })],
+        [{ scenario_id: 'WP_RP_HAPPY', verdict: 'INCONCLUSIVE' }]
+      )
+    );
+    expect(summary.result).toBe('fail');
+  });
 });

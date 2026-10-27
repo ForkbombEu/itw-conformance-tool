@@ -11,6 +11,7 @@ import { serveRunner } from '../../commands/serveRunner.js';
 import { runnerResultSchema } from '../../runner-api/contract.js';
 import { JobManager } from '../../runner-api/job-manager.js';
 import { JobStore, type StoredRun } from '../../runner-api/job-store.js';
+import { writeNativeChildMarker } from '../../runner-api/native-child-marker.js';
 import { createOperatorFixture, writeProfilesFile } from './helpers/operator-fixture.js';
 
 import type { RunnerResult, RunRequest } from '../../runner-api/contract.js';
@@ -245,10 +246,12 @@ describe('restart recovery', () => {
     seedLegacyRun(stateDir, 'run-live-child', 'live-key', request(), 'running');
     const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { detached: true, stdio: 'ignore' });
     mkdirSync(join(stateDir, 'work', 'run-live-child'), { recursive: true });
-    writeFileSync(
-      join(stateDir, 'work', 'run-live-child', 'native-child.json'),
-      JSON.stringify({ pid: sleeper.pid, startedAt: new Date().toISOString() })
-    );
+    // The production writer records pid + boot ID + process start time.
+    writeNativeChildMarker(join(stateDir, 'work', 'run-live-child'), sleeper.pid ?? 0, new Date().toISOString());
+    const marker = JSON.parse(readFileSync(join(stateDir, 'work', 'run-live-child', 'native-child.json'), 'utf-8'));
+    expect(marker.processStartTicks).toMatch(/^\d+$/);
+    expect(marker.bootId).toBeTypeOf('string');
+    expect(readdirSync(join(stateDir, 'work', 'run-live-child')).some((f) => f.includes('.tmp'))).toBe(false);
     try {
       await expect(serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir })).rejects.toThrow(
         /still alive/
@@ -287,5 +290,91 @@ describe('corrupt records', () => {
     );
     const m = new JobManager({ execute: neverExecute, store: new JobStore(stateDir) });
     await expect(m.submit(request(), 'orphan-key')).rejects.toMatchObject({ code: 'RUN_RECORD_CORRUPT' });
+  });
+});
+
+describe('native child marker robustness (review finding 3)', () => {
+  function seedStrandedWithMarker(stateDir: string, runId: string, marker: string): string {
+    seedLegacyRun(stateDir, runId, `${runId}-key`, request(), 'running');
+    const dir = join(stateDir, 'work', runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'native-child.json'), marker);
+    return dir;
+  }
+
+  it('a truncated marker does not block every restart: it is quarantined with a clear diagnostic', async () => {
+    const stateDir = freshStateDir();
+    const dir = seedStrandedWithMarker(stateDir, 'run-truncated', '{"pid": 12');
+    const handle = await serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir });
+    try {
+      const response = await fetch(`${handle.url}/v1/runs/run-truncated/result`, {
+        headers: { authorization: 'Bearer recovery-token' }
+      });
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as RunnerResult).execution.status).toBe('error');
+      expect(existsSync(join(dir, 'native-child.json'))).toBe(false);
+      expect(existsSync(join(dir, 'native-child.json.corrupt'))).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('a live but unrelated process reusing the recorded pid (different start identity) does not block startup', async () => {
+    const stateDir = freshStateDir();
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { detached: true, stdio: 'ignore' });
+    try {
+      seedStrandedWithMarker(
+        stateDir,
+        'run-reused-pid',
+        JSON.stringify({ pid: sleeper.pid, processStartTicks: '1', startedAt: new Date().toISOString() })
+      );
+      const handle = await serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir });
+      await handle.close();
+    } finally {
+      process.kill(-(sleeper.pid ?? 0), 'SIGKILL');
+    }
+  });
+
+  it('a marker from a previous boot does not block startup', async () => {
+    const stateDir = freshStateDir();
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { detached: true, stdio: 'ignore' });
+    try {
+      seedStrandedWithMarker(
+        stateDir,
+        'run-old-boot',
+        JSON.stringify({ bootId: 'boot-before-reboot', pid: sleeper.pid, startedAt: new Date().toISOString() })
+      );
+      const handle = await serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir });
+      await handle.close();
+    } finally {
+      process.kill(-(sleeper.pid ?? 0), 'SIGKILL');
+    }
+  });
+
+  it('an independent FAIL survives restart recovery as fail next to an INCONCLUSIVE scenario (review finding 1)', async () => {
+    const stateDir = freshStateDir();
+    const req = request();
+    seedLegacyRun(stateDir, 'run-partial', 'partial-key', req, 'running');
+    const path = join(stateDir, 'runs', 'run-partial.json');
+    const record = JSON.parse(readFileSync(path, 'utf-8')) as StoredRun;
+    const partial = completedResult('run-partial', req);
+    partial.native.assertions = [
+      { ...partial.native.assertions[0]!, assertion_id: 'a0001', raw: JSON.stringify({ full_title: 'generic' }) },
+      {
+        ...partial.native.assertions[0]!,
+        assertion_id: 'a0002',
+        raw: JSON.stringify({ full_title: 'matcher', scenario_id: 'WP_RP_HAPPY' })
+      }
+    ];
+    partial.native.scenario_outcomes = [{ scenario_id: 'WP_RP_HAPPY', verdict: 'INCONCLUSIVE' }];
+    writeFileSync(path, JSON.stringify({ ...record, result: partial }));
+    const store = new JobStore(stateDir);
+    expect(store.acquireRootLock()).toBe(true);
+    const m = new JobManager({ execute: neverExecute, store });
+    m.recoverInterruptedRuns();
+    const result = await m.getResult('run-partial');
+    expect(result.execution.status).toBe('error');
+    expect(result.summary.result).toBe('fail');
+    store.releaseRootLock();
   });
 });

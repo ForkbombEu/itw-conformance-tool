@@ -1,6 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-
 import { acknowledgeInteraction, AutomationChannelError, listPendingInteractions } from '@itw-conformance-tool/utils';
 
 import {
@@ -13,6 +10,7 @@ import {
   runnerResultSchema
 } from './contract.js';
 import { generateRunId, JobStore, type StoredRun } from './job-store.js';
+import { isRecordedNativeGroupAlive, readNativeChildMarker, type NativeChildMarker } from './native-child-marker.js';
 import { summarizeWithLimitations } from './summarize.js';
 
 import type { PrivateArtifact } from './artifacts.js';
@@ -36,9 +34,6 @@ function channelErrorToRunnerError(error: unknown, interactionId: string): Runne
 }
 
 const MAX_ERROR_LENGTH = 2_000;
-
-/** Written by the native worker into the run workspace once the child is spawned. */
-export const NATIVE_CHILD_MARKER = 'native-child.json';
 
 /** Why a live run's abort signal fired; set before aborting, never inferred. */
 export type AbortReason = 'cancel' | 'deadline' | 'shutdown';
@@ -411,32 +406,47 @@ export class JobManager {
    * previous native process group of such a run is still alive, rather than
    * launching new work on top of it.
    */
-  recoverInterruptedRuns(isProcessGroupAlive: (pid: number) => boolean): string[] {
+  recoverInterruptedRuns(isNativeGroupAlive: (marker: NativeChildMarker) => boolean = isRecordedNativeGroupAlive): {
+    diagnostics: string[];
+    recovered: string[];
+  } {
     if (!this.store.ownsRootLock()) {
       throw new Error('Recovery requires exclusive ownership of the state root');
     }
     const stranded = this.store
       .allRuns()
       .filter((run) => !isTerminalStatus(run.status) && this.live?.runId !== run.runId);
+    const diagnostics: string[] = [];
+    const markerNotes = new Map<string, string>();
     for (const run of stranded) {
-      const marker = join(this.store.workDir(run.runId), NATIVE_CHILD_MARKER);
-      if (!existsSync(marker)) continue;
-      const pid = (JSON.parse(readFileSync(marker, 'utf-8')) as { pid?: unknown }).pid;
-      if (typeof pid === 'number' && isProcessGroupAlive(pid)) {
+      const read = readNativeChildMarker(this.store.workDir(run.runId));
+      if (read.kind === 'corrupt') {
+        const note = `Run ${run.runId}: native child marker was unreadable and was quarantined; the previous native process could not be identified.`;
+        diagnostics.push(`${note} (${read.quarantinedTo})`);
+        markerNotes.set(run.runId, note);
+        continue;
+      }
+      if (read.kind === 'ok' && isNativeGroupAlive(read.marker)) {
         throw new Error(
-          `Run ${run.runId}: its previous native process group ${pid} is still alive; stop it before restarting the runner`
+          `Run ${run.runId}: its previous native process group ${read.marker.pid} is still alive; stop it before restarting the runner`
         );
       }
     }
     const finishedAt = this.clock().toISOString();
     for (const run of stranded) {
       const reason = `Run interrupted: the runner restarted while the run was ${run.status}.`;
+      const extra = markerNotes.get(run.runId);
       const result = run.result
-        ? withLifecycle(run.result, 'error', finishedAt, [reason])
-        : buildErrorResult(run, reason, 'error', finishedAt);
-      this.store.saveRun({ ...run, result, status: 'error', updatedAt: finishedAt });
+        ? withLifecycle(run.result, 'error', finishedAt, extra ? [reason, extra] : [reason])
+        : buildErrorResult(run, extra ? `${reason} ${extra}` : reason, 'error', finishedAt);
+      this.store.saveRun({
+        ...run,
+        result: publishable(run, result, finishedAt),
+        status: 'error',
+        updatedAt: finishedAt
+      });
     }
-    return stranded.map((run) => run.runId);
+    return { diagnostics, recovered: stranded.map((run) => run.runId) };
   }
 
   /** Idempotent graceful shutdown: blocks submissions, finalizes and awaits the live run. */

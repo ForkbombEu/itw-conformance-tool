@@ -281,6 +281,33 @@ describe('native-worker — real ConformanceReporter child', () => {
   }, 60_000);
 });
 
+describe('native-worker — errors outside test bodies never publish pass (review finding 2)', () => {
+  for (const [mode, message] of [
+    ['afterall-error', 'deliberate afterAll failure'],
+    ['unhandled', 'deliberate unhandled rejection']
+  ] as const) {
+    it(`${mode}: all executed tests PASS, but the result is not pass`, async () => {
+      const { adapter } = realReporterAdapter(mode);
+      const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile() });
+      const runRoot = join(dir, 'run');
+      mkdirSync(runRoot);
+      const evidence = await execute({
+        abortSignal: new AbortController().signal,
+        request: makeRequest(),
+        runId: `run-${mode}`,
+        runRoot
+      });
+      const result = evidence.result;
+      expect(result.native.native_suite_status).toBe('INCOMPLETE');
+      expect(result.native.assertions.length).toBeGreaterThan(0);
+      expect(result.native.assertions.every((a) => a.native_status === 'PASS')).toBe(true);
+      expect(result.summary.result).not.toBe('pass');
+      expect(result.summary.result).toBe('partial');
+      expect(result.limitations.join(' ')).toContain(message);
+    }, 60_000);
+  }
+});
+
 function nativeAssertionsAreWireValid(result: RunnerResult): boolean {
   return result.native.assertions.every((assertion) => nativeAssertionSchema.safeParse(assertion).success);
 }

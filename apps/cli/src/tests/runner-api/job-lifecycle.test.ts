@@ -276,4 +276,32 @@ describe('JobManager lifecycle truth', () => {
     const result = await expectAgreement(m, snapshot.run_id, 'cancelled');
     expect(result.summary.result).not.toBe('pass');
   });
+
+  it('cancel/deadline recompute keeps an independent FAIL next to an INCONCLUSIVE scenario as fail (review finding 1)', async () => {
+    // Adapted assertions carry the producer JSON in `raw`: a generic check has
+    // no scenario_id, a scenario matcher names its scenario.
+    const generic = { ...assertion('a1', 'FAIL'), raw: JSON.stringify({ full_title: 'generic cleanup' }) };
+    const matcher = {
+      ...assertion('a2', 'FAIL'),
+      raw: JSON.stringify({ full_title: 'matcher', scenario_id: 'WP_RP_HAPPY' })
+    };
+    for (const [key, cancel] of [
+      ['k10-cancel', true],
+      ['k10-deadline', false]
+    ] as const) {
+      const m = manager(async (ctx) => {
+        await untilAborted(ctx);
+        const e = evidence(ctx, [generic, matcher]);
+        e.result.native.scenario_outcomes = [{ scenario_id: 'WP_RP_HAPPY', verdict: 'INCONCLUSIVE' }];
+        return e;
+      });
+      const { snapshot } = await m.submit(request(cancel ? 60_000 : 1_000), key);
+      if (cancel) await m.cancel(snapshot.run_id);
+      await terminal(m, snapshot.run_id);
+      const result = await expectAgreement(m, snapshot.run_id, cancel ? 'cancelled' : 'timed_out');
+      expect(result.summary.result, key).toBe('fail');
+      expect(result.summary.native_failed_assertion_count).toBe(2);
+      await m.shutdown();
+    }
+  });
 });

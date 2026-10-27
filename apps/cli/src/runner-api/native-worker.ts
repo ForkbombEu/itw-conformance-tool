@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { readScenarioOutcomes } from '@itw-conformance-tool/utils';
 
-import { NATIVE_CHILD_MARKER } from './job-manager.js';
+import { writeNativeChildMarker } from './native-child-marker.js';
 import {
   provisionInitializedAssets,
   resolveCliEntry,
@@ -93,7 +93,7 @@ const OWNED_ENV_KEYS = [
   'ITWCT_SERVICE_CONTROL_ENDPOINT'
 ];
 
-export function processGroupAlive(pid: number): boolean {
+function processGroupAlive(pid: number): boolean {
   try {
     process.kill(-pid, 0);
     return true;
@@ -203,7 +203,7 @@ export function createNativeExecutor(
     const finishDiagnostics = captureDiagnostics(child, join(diagnosticsDir, NATIVE_DIAGNOSTICS_FILENAME));
     // Lets restart recovery detect a native process group that outlived a crashed runner.
     if (child.pid) {
-      writeFileSync(join(runRoot, NATIVE_CHILD_MARKER), JSON.stringify({ pid: child.pid, startedAt }), { mode: 0o600 });
+      writeNativeChildMarker(runRoot, child.pid, startedAt);
     }
 
     let onAbort: (() => void) | undefined;

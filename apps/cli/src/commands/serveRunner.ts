@@ -4,7 +4,7 @@ import { ArtifactStore } from '../runner-api/artifacts.js';
 import { JobManager, type ExecuteContext, type ExecutionEvidence } from '../runner-api/job-manager.js';
 import { JobStore } from '../runner-api/job-store.js';
 import { resolveEngineIdentity } from '../runner-api/native-launch.js';
-import { createNativeExecutor, processGroupAlive, type ProcessAdapter } from '../runner-api/native-worker.js';
+import { createNativeExecutor, type ProcessAdapter } from '../runner-api/native-worker.js';
 import { loadProfileCatalogue } from '../runner-api/profiles.js';
 import { createRunnerServer } from '../runner-api/server.js';
 
@@ -58,7 +58,8 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
     for (const record of store.quarantinedRecords()) {
       process.stderr.write(`Quarantined corrupt run record ${record.file}: ${record.reason}\n`);
     }
-    jobManager.recoverInterruptedRuns(processGroupAlive);
+    const recovery = jobManager.recoverInterruptedRuns();
+    for (const diagnostic of recovery.diagnostics) process.stderr.write(`Recovery: ${diagnostic}\n`);
     const app = createRunnerServer({ artifacts, catalogue, engine: identity.engine, jobManager });
 
     try {
