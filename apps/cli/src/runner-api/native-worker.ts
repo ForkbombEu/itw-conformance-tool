@@ -1,19 +1,28 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import {
+  provisionInitializedAssets,
+  resolveCliEntry,
+  resolveEngineIdentity,
+  resolveRepositoryRoot
+} from './native-launch.js';
 import { validateAndAdaptNativeExport, type AdaptedNativeExport } from './native-result-adapter.js';
 import { assertSelectionAllowed } from './profiles.js';
 import { summarizeWithLimitations } from './summarize.js';
 
 import type { RunRequest, RunnerResult } from './contract.js';
-import type { Profile } from './profiles.js';
+import type { LoadedProfile } from './profiles.js';
+import type { Readable } from 'node:stream';
 
 export interface SpawnedProcess {
   kill(signal?: NodeJS.Signals): boolean;
   on(event: 'error', listener: (err: Error) => void): void;
   on(event: 'exit', listener: (code: null | number) => void): void;
-  pid: number | undefined;
+  readonly pid?: number | undefined;
+  stderr: null | Readable;
+  stdout: null | Readable;
 }
 
 export interface SpawnOptions {
@@ -21,138 +30,210 @@ export interface SpawnOptions {
   detached: boolean;
   env: NodeJS.ProcessEnv;
   shell: boolean;
-  stdio: 'ignore' | 'pipe';
+  stdio: 'pipe';
 }
 
+/** The low-level subprocess boundary; the default launches a real OS process. */
 export interface ProcessAdapter {
   spawn(command: string, args: string[], options: SpawnOptions): SpawnedProcess;
 }
 
 export const defaultProcessAdapter: ProcessAdapter = {
   spawn(command, args, options) {
-    return spawn(command, args, options) as unknown as SpawnedProcess;
+    return spawn(command, args, options);
   }
 };
 
 export interface NativeExecutorOptions {
+  /** Grace period between SIGTERM and SIGKILL of the native process group. */
+  killGraceMs?: number;
   processAdapter?: ProcessAdapter;
-  profile: Profile;
-  request: RunRequest;
+  profile: LoadedProfile;
 }
 
-import { createRequire } from 'node:module';
-
-function resolveCliEntry(): string {
-  // Resolve the compiled CLI entrypoint from the installed module location
-  try {
-    const req = createRequire(import.meta.url);
-    return req.resolve('itw-conformance-cli/dist/main.js');
-  } catch {
-    // Fallback: assume running from source
-    return process.argv[1] ?? 'node';
-  }
-}
-
-/** File name the native ConformanceReporter publishes into ITWCT_RESULTS_DIR. */
-export const NATIVE_EXPORT_FILENAME = 'native-results.json';
-
-const UNKNOWN_REVISION_LIMITATION = 'engine.revision is unknown: no trusted build/source revision was supplied.';
-
-const ENGINE_INFO = {
-  fork_repository: 'https://github.com/ForkbombEu/itw-conformance-tool',
-  id: 'pagopa-itwct',
-  upstream_repository: 'https://github.com/pagopa/itw-conformance-tool'
-};
-
-export function createNativeExecutor(
-  options: NativeExecutorOptions
-): (ctx: {
+export interface NativeExecuteContext {
   abortSignal: AbortSignal;
   request: RunRequest;
   runId: string;
   runRoot: string;
-}) => Promise<{ privateArtifactPaths: string[]; result: RunnerResult }> {
+}
+
+export interface NativeEvidence {
+  privateArtifactPaths: string[];
+  result: RunnerResult;
+}
+
+/** File name the native ConformanceReporter publishes into ITWCT_RESULTS_DIR. */
+export const NATIVE_EXPORT_FILENAME = 'native-results.json';
+/** Bounded private diagnostics captured from the native child's stdout/stderr. */
+export const NATIVE_DIAGNOSTICS_FILENAME = 'native-child.log';
+export const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
+
+const DEFAULT_KILL_GRACE_MS = 15_000;
+
+/** Environment the runner owns for the native child; inherited values are discarded. */
+const OWNED_ENV_KEYS = [
+  'CREDIMI_RUNNER_TOKEN',
+  'ITWCT_AUTOMATION_DIR',
+  'ITWCT_CONFIG_PATH',
+  'ITWCT_CONFORMANCE_TEST_CATEGORY',
+  'ITWCT_CONFORMANCE_VERBOSE',
+  'ITWCT_DATA_DIR',
+  'ITWCT_PRESENTATION_SCENARIO_IDS',
+  'ITWCT_REPOSITORY_ROOT',
+  'ITWCT_RESULTS_DIR',
+  'ITWCT_RUN_ID',
+  'ITWCT_SERVICE_CONTROL_ENDPOINT'
+];
+
+function processGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group may already be gone.
+  }
+}
+
+/** Waits until every process in the native group (CLI, services, Vitest) has exited. */
+async function awaitGroupExit(pid: number, graceMs: number): Promise<void> {
+  const deadline = Date.now() + graceMs;
+  while (processGroupAlive(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (processGroupAlive(pid)) {
+    signalGroup(pid, 'SIGKILL');
+    const killDeadline = Date.now() + 5_000;
+    while (processGroupAlive(pid) && Date.now() < killDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+/** Drains both pipes so the child can never block on a full pipe; keeps a bounded private log. */
+function captureDiagnostics(child: SpawnedProcess, logPath: string): () => Promise<{ truncated: boolean }> {
+  const log = createWriteStream(logPath, { flags: 'a', mode: 0o600 });
+  let written = 0;
+  let truncated = false;
+  const onData = (chunk: Buffer | string): void => {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+    const room = MAX_DIAGNOSTIC_BYTES - written;
+    if (room <= 0) {
+      truncated = true;
+      return;
+    }
+    const slice = buffer.length > room ? buffer.subarray(0, room) : buffer;
+    if (slice.length < buffer.length) truncated = true;
+    written += slice.length;
+    log.write(slice);
+  };
+  child.stdout?.on('data', onData);
+  child.stderr?.on('data', onData);
+  return () =>
+    new Promise((resolve) => {
+      child.stdout?.off('data', onData);
+      child.stderr?.off('data', onData);
+      log.end(() => resolve({ truncated }));
+    });
+}
+
+export function createNativeExecutor(
+  options: NativeExecutorOptions
+): (ctx: NativeExecuteContext) => Promise<NativeEvidence> {
   const adapter = options.processAdapter ?? defaultProcessAdapter;
+  const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
 
   return async (ctx) => {
-    const { runId, runRoot } = ctx;
-    const { profile, request } = options;
+    const { abortSignal, request, runId, runRoot } = ctx;
+    const { profile } = options;
 
-    // Validate selection before spawning
+    if (request.profile_id !== profile.id || request.category !== profile.category) {
+      throw new Error(`Request does not match profile '${profile.id}'`);
+    }
     assertSelectionAllowed(profile, request.selection.ids);
+    if (abortSignal.aborted) throw new Error('Run was aborted before the native child was spawned');
 
     const resultsDir = join(runRoot, 'results');
     const dataDir = join(runRoot, 'data');
+    const diagnosticsDir = join(runRoot, 'diagnostics');
     mkdirSync(resultsDir, { recursive: true });
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(diagnosticsDir, { recursive: true });
+    provisionInitializedAssets(profile.initializedAssetsDir, dataDir);
 
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
+    const cliEntry = resolveCliEntry();
+    const repositoryRoot = resolveRepositoryRoot();
+
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of OWNED_ENV_KEYS) delete env[key];
+    Object.assign(env, {
       ITWCT_AUTOMATION_DIR: runRoot,
       ITWCT_CONFIG_PATH: profile.configPath,
       ITWCT_DATA_DIR: dataDir,
       ITWCT_PRESENTATION_SCENARIO_IDS: request.selection.ids.join(','),
+      ITWCT_REPOSITORY_ROOT: repositoryRoot,
       ITWCT_RESULTS_DIR: resultsDir,
       ITWCT_RUN_ID: runId
-    };
+    });
 
     const startedAt = new Date().toISOString();
+    const identity = resolveEngineIdentity();
 
-    // Resolve compiled CLI entrypoint from installed module location
-    const cliEntry = resolveCliEntry();
     const child = adapter.spawn(process.execPath, [cliEntry, 'test', 'presentation', '--verbose'], {
       cwd: runRoot,
-      detached: true,
+      detached: process.platform !== 'win32',
       env,
       shell: false,
       stdio: 'pipe'
     });
+    const finishDiagnostics = captureDiagnostics(child, join(diagnosticsDir, NATIVE_DIAGNOSTICS_FILENAME));
 
-    const exitCode = await new Promise<null | number>((resolve, reject) => {
-      let settled = false;
-      const settle = (code: null | number) => {
-        if (!settled) {
-          settled = true;
-          resolve(code);
-        }
-      };
-      child.on('exit', (code) => settle(code));
-      child.on('error', (err) => {
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
+    let onAbort: (() => void) | undefined;
+    let escalation: NodeJS.Timeout | undefined;
+    let exitCode: null | number;
+    try {
+      exitCode = await new Promise<null | number>((resolve, reject) => {
+        child.on('exit', (code) => resolve(code));
+        child.on('error', (err) => reject(err));
+        onAbort = () => {
+          if (!child.pid) return;
+          signalGroup(child.pid, 'SIGTERM');
+          escalation = setTimeout(() => {
+            if (child.pid) signalGroup(child.pid, 'SIGKILL');
+          }, killGraceMs);
+        };
+        if (abortSignal.aborted) onAbort();
+        else abortSignal.addEventListener('abort', onAbort, { once: true });
       });
-      ctx.abortSignal.addEventListener('abort', () => {
-        if (child.pid) {
-          try {
-            process.kill(-child.pid, 'SIGTERM');
-          } catch {
-            // ignore
-          }
-          setTimeout(() => {
-            if (!settled && child.pid) {
-              try {
-                process.kill(-child.pid, 'SIGKILL');
-              } catch {
-                // ignore
-              }
-            }
-          }, 5_000);
-        }
-      });
-    });
+    } finally {
+      if (onAbort) abortSignal.removeEventListener('abort', onAbort);
+      clearTimeout(escalation);
+      // Services/Vitest share the child's process group; none may outlive the run.
+      if (child.pid && process.platform !== 'win32') await awaitGroupExit(child.pid, killGraceMs);
+    }
+    const { truncated } = await finishDiagnostics();
 
     const finishedAt = new Date().toISOString();
+    const baseLimitations = [
+      ...identity.limitations,
+      ...(truncated ? [`Native child diagnostics were truncated at ${MAX_DIAGNOSTIC_BYTES} bytes.`] : [])
+    ];
+
+    const errorResult = (reason: string): RunnerResult =>
+      buildErrorResult({ exitCode, finishedAt, identity, profile, reason, request, runId, startedAt }, baseLimitations);
 
     // Read the native export the REAL reporter wrote, validate it against the
     // producer format and adapt it; never trust or cast unvalidated JSON.
     const exportPath = join(resultsDir, NATIVE_EXPORT_FILENAME);
     if (!existsSync(exportPath)) {
-      return {
-        privateArtifactPaths: [],
-        result: buildErrorResult(runId, request, profile, startedAt, finishedAt, exitCode, 'Native export is missing')
-      };
+      return { privateArtifactPaths: [], result: errorResult('Native export is missing') };
     }
 
     let adapted: AdaptedNativeExport;
@@ -165,18 +246,7 @@ export function createNativeExecutor(
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       // Keep the raw bytes as evidence even though they were rejected.
-      return {
-        privateArtifactPaths: [exportPath],
-        result: buildErrorResult(
-          runId,
-          request,
-          profile,
-          startedAt,
-          finishedAt,
-          exitCode,
-          `Native export rejected: ${reason}`
-        )
-      };
+      return { privateArtifactPaths: [exportPath], result: errorResult(`Native export rejected: ${reason}`) };
     }
 
     const native: RunnerResult['native'] = {
@@ -218,12 +288,12 @@ export function createNativeExecutor(
         ],
         category: profile.category,
         contract_version: '1.0',
-        engine: { ...ENGINE_INFO, revision: 'unknown', version: '1.0' },
+        engine: identity.engine,
         execution,
         limitations: [
           ...limitations,
           ...adapted.errors.map((message) => `Native error outside test bodies: ${message}`),
-          UNKNOWN_REVISION_LIMITATION
+          ...baseLimitations
         ],
         native,
         profile_id: profile.id,
@@ -236,20 +306,24 @@ export function createNativeExecutor(
   };
 }
 
-function buildErrorResult(
-  runId: string,
-  request: RunRequest,
-  profile: Profile,
-  startedAt: string,
-  finishedAt: string,
-  exitCode: null | number,
-  reason: string
-): RunnerResult {
+interface ErrorResultInput {
+  exitCode: null | number;
+  finishedAt: string;
+  identity: ReturnType<typeof resolveEngineIdentity>;
+  profile: LoadedProfile;
+  reason: string;
+  request: RunRequest;
+  runId: string;
+  startedAt: string;
+}
+
+function buildErrorResult(input: ErrorResultInput, limitations: string[]): RunnerResult {
+  const { exitCode, finishedAt, identity, profile, reason, request, runId, startedAt } = input;
   return {
     artifacts: [],
     category: profile.category,
     contract_version: '1.0',
-    engine: { ...ENGINE_INFO, revision: 'unknown', version: '1.0' },
+    engine: identity.engine,
     execution: {
       error: reason,
       ...(exitCode === null ? {} : { exit_code: exitCode }),
@@ -257,7 +331,7 @@ function buildErrorResult(
       started_at: startedAt,
       status: 'error'
     },
-    limitations: [reason, UNKNOWN_REVISION_LIMITATION],
+    limitations: [reason, ...limitations],
     native: {
       assertions: [],
       coverage_mode: profile.coverageMode,

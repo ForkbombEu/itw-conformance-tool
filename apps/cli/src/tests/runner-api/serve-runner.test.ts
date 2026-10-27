@@ -1,13 +1,24 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { serveRunner } from '../../commands/serveRunner.js';
+import { createOperatorFixture, type OperatorFixture, writeProfilesFile } from './helpers/operator-fixture.js';
 
 let tempDir: string;
 let savedToken: undefined | string;
+let fixture: OperatorFixture;
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'wct-serve-operator-'));
+
+beforeAll(async () => {
+  fixture = await createOperatorFixture(fixtureRoot);
+});
+
+afterAll(() => {
+  rmSync(fixtureRoot, { force: true, recursive: true });
+});
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'wct-serve-'));
@@ -24,22 +35,16 @@ afterEach(() => {
 });
 
 function writeProfiles(): string {
-  const p = join(tempDir, 'profiles.json');
-  writeFileSync(
-    p,
-    JSON.stringify({
-      profiles: [
-        {
-          allowedScenarioIds: ['WP_RP_HAPPY'],
-          category: 'presentation',
-          configPath: '/abs/config.ini',
-          coverageMode: 'interoperability',
-          id: 'test'
-        }
-      ]
-    })
-  );
-  return p;
+  return writeProfilesFile(join(tempDir, 'profiles.json'), [
+    {
+      allowedScenarioIds: ['WP_RP_HAPPY'],
+      category: 'presentation',
+      configPath: fixture.configPath,
+      coverageMode: 'interoperability',
+      id: 'test',
+      initializedAssetsDir: fixture.assetsDir
+    }
+  ]);
 }
 
 describe('serveRunner', () => {
@@ -69,7 +74,16 @@ describe('serveRunner', () => {
     ).rejects.toThrow(/not found/);
   });
 
-  it('starts and stops cleanly', async () => {
+  it('rejects an empty profiles list without taking the state lock', async () => {
+    process.env.CREDIMI_RUNNER_TOKEN = 'test';
+    const profiles = join(tempDir, 'empty.json');
+    writeFileSync(profiles, JSON.stringify({ profiles: [] }));
+    const stateDir = join(tempDir, 'state');
+    await expect(serveRunner({ host: '127.0.0.1', port: 0, profiles, stateDir })).rejects.toThrow(/At least one/);
+    expect(existsSync(join(stateDir, '.owner.lock'))).toBe(false);
+  });
+
+  it('starts and stops cleanly, reporting the actual bound port', async () => {
     process.env.CREDIMI_RUNNER_TOKEN = 'test-token';
     const handle = await serveRunner({
       host: '127.0.0.1',
@@ -77,8 +91,10 @@ describe('serveRunner', () => {
       profiles: writeProfiles(),
       stateDir: join(tempDir, 'state')
     });
-    expect(handle.url).toContain('127.0.0.1:');
+    expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(handle.url).not.toMatch(/:0$/);
     await handle.close();
+    expect(existsSync(join(tempDir, 'state', '.owner.lock'))).toBe(false);
   });
 
   it('denies second instance on same state dir', async () => {

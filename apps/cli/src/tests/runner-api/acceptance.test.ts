@@ -8,6 +8,7 @@ import { ArtifactStore } from '../../runner-api/artifacts.js';
 import { JobManager } from '../../runner-api/job-manager.js';
 import { JobStore } from '../../runner-api/job-store.js';
 import { createRunnerServer } from '../../runner-api/server.js';
+import { stubCatalogue, TEST_ENGINE } from './helpers/operator-fixture.js';
 
 import type { RunRequest, RunnerResult } from '../../runner-api/contract.js';
 import type { ExecuteFn } from '../../runner-api/job-manager.js';
@@ -101,7 +102,7 @@ describe('Acceptance — full API/job/export integration', () => {
     const store = new JobStore(dir);
     const artifacts = new ArtifactStore();
     const jobManager = new JobManager({ execute, store });
-    const app = createRunnerServer({ artifacts, jobManager });
+    const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
 
     // Start run
@@ -191,7 +192,7 @@ describe('Acceptance — full API/job/export integration', () => {
     const store = new JobStore(dir);
     const artifacts = new ArtifactStore();
     const jobManager = new JobManager({ execute, store });
-    const app = createRunnerServer({ artifacts, jobManager });
+    const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
 
     const createRes = await app.inject({
@@ -234,7 +235,7 @@ describe('Acceptance — full API/job/export integration', () => {
     const store = new JobStore(dir);
     const artifacts = new ArtifactStore();
     const jobManager = new JobManager({ execute, store });
-    const app = createRunnerServer({ artifacts, jobManager });
+    const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
 
     const createRes = await app.inject({
@@ -268,7 +269,7 @@ describe('Acceptance — full API/job/export integration', () => {
     const store = new JobStore(dir);
     const artifacts = new ArtifactStore();
     const jobManager = new JobManager({ execute, store });
-    const app = createRunnerServer({ artifacts, jobManager });
+    const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
 
     const results = await Promise.allSettled([
@@ -319,7 +320,7 @@ describe('Acceptance — full API/job/export integration', () => {
       execute: async () => ({ privateArtifactPaths: [], result: makeResult() }),
       store
     });
-    const app = createRunnerServer({ artifacts, jobManager });
+    const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
 
     // Try to access the secret file through artifact route

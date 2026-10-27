@@ -4,24 +4,29 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-import { ConfigIniTemplate } from '@itw-conformance-tool/config';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { nativeAssertionSchema } from '../../runner-api/contract.js';
 import { createNativeExecutor } from '../../runner-api/native-worker.js';
+import { createOperatorFixture, loadedProfile, type OperatorFixture } from './helpers/operator-fixture.js';
 
 import type { RunnerResult, RunRequest } from '../../runner-api/contract.js';
 import type { ProcessAdapter, SpawnOptions, SpawnedProcess } from '../../runner-api/native-worker.js';
-import type { Profile } from '../../runner-api/profiles.js';
+import type { LoadedProfile } from '../../runner-api/profiles.js';
 
-function makeProfile(): Profile {
-  return {
-    allowedScenarioIds: ['WP_RP_HAPPY'],
-    category: 'presentation',
-    configPath: '/abs/config.ini',
-    coverageMode: 'interoperability',
-    id: 'test-profile'
-  };
+let fixture: OperatorFixture;
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'wct-nw-operator-'));
+
+beforeAll(async () => {
+  fixture = await createOperatorFixture(fixtureRoot);
+});
+
+afterAll(() => {
+  rmSync(fixtureRoot, { force: true, recursive: true });
+});
+
+function makeProfile(): LoadedProfile {
+  return loadedProfile(fixture, { id: 'test-profile' });
 }
 
 function makeRequest(): RunRequest {
@@ -36,6 +41,7 @@ function makeRequest(): RunRequest {
   };
 }
 
+/** Records spawn arguments and exits without running anything (no real pid). */
 function makeFakeAdapter(exitCode = 0) {
   const spawns: { args: string[]; command: string; options: SpawnOptions }[] = [];
   const adapter: ProcessAdapter = {
@@ -44,10 +50,12 @@ function makeFakeAdapter(exitCode = 0) {
       const listeners: Record<string, ((...a: unknown[]) => void)[]> = { error: [], exit: [] };
       const handle: SpawnedProcess = {
         kill: () => true,
-        on(event, listener) {
+        on(event: string, listener: (...a: never[]) => void) {
           listeners[event]?.push(listener as (...a: unknown[]) => void);
         },
-        pid: 12345
+        pid: undefined,
+        stderr: null,
+        stdout: null
       };
       setTimeout(() => {
         for (const fn of listeners.exit ?? []) fn(exitCode);
@@ -71,7 +79,7 @@ afterEach(() => {
 describe('native-worker — args/env/cwd', () => {
   it('spawns with correct env and cwd', async () => {
     const { adapter, spawns } = makeFakeAdapter();
-    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request: makeRequest() });
+    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile() });
     await execute({ abortSignal: new AbortController().signal, request: makeRequest(), runId: 'run-1', runRoot: dir });
     expect(spawns).toHaveLength(1);
     expect(spawns[0]?.options.cwd).toBe(dir);
@@ -87,7 +95,7 @@ describe('native-worker — selection rejection', () => {
   it('rejects unpermitted selection before spawn', async () => {
     const { adapter, spawns } = makeFakeAdapter();
     const request = { ...makeRequest(), selection: { ids: ['EVIL'] } };
-    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request });
+    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile() });
     await expect(
       execute({ abortSignal: new AbortController().signal, request, runId: 'run-1', runRoot: dir })
     ).rejects.toThrow(/not allowed/);
@@ -126,7 +134,7 @@ function writeProducerExport(root: string, overrides: Record<string, unknown> = 
 async function executeWith(exportOverrides: Record<string, unknown> | undefined, exitCode = 0) {
   const { adapter } = makeFakeAdapter(exitCode);
   if (exportOverrides) writeProducerExport(dir, exportOverrides);
-  const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile(), request: makeRequest() });
+  const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile() });
   return execute({ abortSignal: new AbortController().signal, request: makeRequest(), runId: 'run-1', runRoot: dir });
 }
 
@@ -211,7 +219,7 @@ function realReporterAdapter(mode: string): { adapter: ProcessAdapter; envSeen: 
         ...options,
         cwd: conformanceRoot,
         env
-      }) as unknown as SpawnedProcess;
+      });
     }
   };
   return { adapter, envSeen };
@@ -219,11 +227,10 @@ function realReporterAdapter(mode: string): { adapter: ProcessAdapter; envSeen: 
 
 describe('native-worker — real ConformanceReporter child', () => {
   it('a deliberate native FAIL flows through the actual adapter as completed + fail', async () => {
-    const configPath = join(dir, 'config.ini');
-    writeFileSync(configPath, ConfigIniTemplate, 'utf-8');
-    const profile = { ...makeProfile(), configPath };
+    const profile = makeProfile();
+    const configPath = profile.configPath;
     const { adapter, envSeen } = realReporterAdapter('mixed');
-    const execute = createNativeExecutor({ processAdapter: adapter, profile, request: makeRequest() });
+    const execute = createNativeExecutor({ processAdapter: adapter, profile });
     const runRoot = join(dir, 'run');
     mkdirSync(runRoot);
 
@@ -253,14 +260,8 @@ describe('native-worker — real ConformanceReporter child', () => {
   }, 60_000);
 
   it('a hook error yields a nonpass result through the actual worker', async () => {
-    const configPath = join(dir, 'config.ini');
-    writeFileSync(configPath, ConfigIniTemplate, 'utf-8');
     const { adapter } = realReporterAdapter('hook-error');
-    const execute = createNativeExecutor({
-      processAdapter: adapter,
-      profile: { ...makeProfile(), configPath },
-      request: makeRequest()
-    });
+    const execute = createNativeExecutor({ processAdapter: adapter, profile: makeProfile() });
     const runRoot = join(dir, 'run');
     mkdirSync(runRoot);
     const evidence = await execute({

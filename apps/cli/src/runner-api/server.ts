@@ -3,17 +3,19 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { ArtifactStore, isSafeArtifactId } from './artifacts.js';
 import { invalidRequest, RunnerError, runRequestSchema } from './contract.js';
 
-import type { RunRequest } from './contract.js';
+import type { RunRequest, RunnerResult } from './contract.js';
 import type { JobManager } from './job-manager.js';
+import type { ProfileCatalogue } from './profiles.js';
 
 export interface RunnerDependencies {
   artifacts: ArtifactStore;
+  catalogue: ProfileCatalogue;
+  engine: RunnerResult['engine'];
   jobManager: JobManager;
 }
 
 const JSON_LIMIT = 65536;
 const CONTRACT_VERSION = '1.0';
-const ENGINE_ID = 'pagopa-itwct';
 
 export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
   const app = Fastify({ bodyLimit: JSON_LIMIT });
@@ -37,20 +39,18 @@ export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
 
   app.get('/healthz', async () => ({ status: 'ok' }));
 
-  app.get('/v1/capabilities', async () => ({
-    categories: ['presentation'],
-    contract_version: CONTRACT_VERSION,
-    engine: {
-      fork_repository: 'https://github.com/ForkbombEu/itw-conformance-tool',
-      id: ENGINE_ID,
-      revision: 'unknown',
-      upstream_repository: 'https://github.com/pagopa/itw-conformance-tool',
-      version: '1.0'
-    },
-    max_timeout_ms: 900_000,
-    profiles: [],
-    selection_catalogue: []
-  }));
+  // Capabilities describe the startup-loaded catalogue; no paths or secrets.
+  app.get('/v1/capabilities', async () => {
+    const profiles = deps.catalogue.publicDescriptors();
+    return {
+      categories: [...new Set(profiles.map((profile) => profile.category))],
+      contract_version: CONTRACT_VERSION,
+      engine: deps.engine,
+      max_timeout_ms: 900_000,
+      profiles,
+      selection_catalogue: [...new Set(profiles.flatMap((profile) => profile.allowed_selection_ids))]
+    };
+  });
 
   app.post('/v1/runs', async (req: FastifyRequest, reply: FastifyReply) => {
     const idempotencyKey = req.headers['idempotency-key'];
@@ -64,7 +64,10 @@ export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
       throw invalidRequest(parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
     }
 
-    const { replayed, snapshot } = await deps.jobManager.submit(parsed.data as RunRequest, idempotencyKey);
+    const request: RunRequest = parsed.data;
+    // Reject what the worker cannot execute before any job is accepted.
+    deps.catalogue.preflight(request);
+    const { replayed, snapshot } = await deps.jobManager.submit(request, idempotencyKey);
     return reply.status(replayed ? 200 : 202).send(snapshot);
   });
 

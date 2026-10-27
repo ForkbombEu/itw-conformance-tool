@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 
 import { testCategories, type TestCategory } from '@itw-conformance-tool/utils';
 
@@ -9,6 +10,18 @@ import { findNxRoot } from '../utils/search.js';
 
 export const SERVICE_CONTROL_ENDPOINT_ENV_VAR = 'ITWCT_SERVICE_CONTROL_ENDPOINT';
 export const CONFORMANCE_VERBOSE_ENV_VAR = 'ITWCT_CONFORMANCE_VERBOSE';
+/** Explicit Nx workspace root, set by the runner for children whose cwd is a per-run workspace. */
+export const REPOSITORY_ROOT_ENV_VAR = 'ITWCT_REPOSITORY_ROOT';
+
+/** The Nx workspace that owns services and the matrix: explicit root first, else search upward from cwd. */
+export function resolveConformanceRoot(environment: NodeJS.ProcessEnv = process.env): string {
+  const explicit = environment[REPOSITORY_ROOT_ENV_VAR]?.trim();
+  if (!explicit) return findNxRoot();
+  if (!isAbsolute(explicit) || !existsSync(join(explicit, 'nx.json'))) {
+    throw new Error(`${REPOSITORY_ROOT_ENV_VAR} must be an absolute Nx workspace root (got '${explicit}')`);
+  }
+  return explicit;
+}
 
 export interface RunConformanceTestsOptions {
   verbose?: boolean;
@@ -133,7 +146,7 @@ export async function runConformanceTests(
   category?: TestCategory,
   options: RunConformanceTestsOptions = {}
 ): Promise<number> {
-  const nxRootPath = findNxRoot();
+  const nxRootPath = resolveConformanceRoot();
   const serviceEnvironment = createConformanceTestEnvironment(
     category,
     process.env,

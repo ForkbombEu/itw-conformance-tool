@@ -8,6 +8,7 @@ import { ArtifactStore } from '../../runner-api/artifacts.js';
 import { JobManager } from '../../runner-api/job-manager.js';
 import { JobStore } from '../../runner-api/job-store.js';
 import { createRunnerServer } from '../../runner-api/server.js';
+import { stubCatalogue, TEST_ENGINE } from './helpers/operator-fixture.js';
 
 import type { RunRequest, RunnerResult } from '../../runner-api/contract.js';
 import type { ExecuteFn } from '../../runner-api/job-manager.js';
@@ -61,7 +62,7 @@ beforeEach(async () => {
   const store = new JobStore(dir);
   const artifacts = new ArtifactStore();
   const jobManager = new JobManager({ execute: makeFakeExecute(), store });
-  app = createRunnerServer({ artifacts, jobManager });
+  app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
   await app.ready();
 });
 

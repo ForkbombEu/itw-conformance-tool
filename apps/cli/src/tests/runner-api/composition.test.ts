@@ -9,6 +9,7 @@ import { JobManager, type ExecuteFn } from '../../runner-api/job-manager.js';
 import { JobStore } from '../../runner-api/job-store.js';
 import { createRunnerServer } from '../../runner-api/server.js';
 import { summarizeResult } from '../../runner-api/summarize.js';
+import { stubCatalogue, TEST_ENGINE } from './helpers/operator-fixture.js';
 
 import type { RunRequest, RunnerResult } from '../../runner-api/contract.js';
 
@@ -189,7 +190,7 @@ describe('Real composition — producer → adapter → summarizer → API', () 
       store
     });
 
-    const app = createRunnerServer({ artifacts, jobManager });
+    const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const addr = app.server?.address();
     if (!addr || typeof addr === 'string') throw new Error('No address');

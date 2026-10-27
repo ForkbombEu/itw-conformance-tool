@@ -60,16 +60,22 @@ export function createProgram(): Command {
     .option('--state-dir <dir>', 'State directory', process.cwd())
     .option('--profiles <file>', 'Absolute path to profiles JSON file')
     .action(async (opts) => {
-      const { serveRunner } = await import('./commands/serveRunner.js');
-      await serveRunner({
+      const { installRunnerSignalHandlers, serveRunner } = await import('./commands/serveRunner.js');
+      const handle = await serveRunner({
         host: opts.host,
         port: Number(opts.port),
         profiles: opts.profiles ?? '',
         stateDir: opts.stateDir
       });
+      process.stdout.write(`Runner listening on ${handle.url}\n`);
+      installRunnerSignalHandlers(handle, (code) => {
+        process.exitCode = code;
+      });
     });
 
-  program.version(readPackageVersion(), '-v, --version', 'display the CLI version');
+  // Resolve the version from this module's location, not the caller's cwd: a
+  // runner-launched child runs with its per-run workspace as cwd.
+  program.version(readPackageVersion(import.meta.dirname), '-v, --version', 'display the CLI version');
 
   return program;
 }
