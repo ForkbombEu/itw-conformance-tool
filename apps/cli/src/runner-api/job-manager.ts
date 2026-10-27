@@ -216,16 +216,36 @@ export class JobManager {
     return this.cancel(run.runId);
   }
 
-  async acknowledge(
-    runId: string,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _interactionId: string,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _ack: AckMessage
-  ): Promise<RunSnapshot> {
+  async acknowledge(runId: string, interactionId: string, ack: AckMessage): Promise<RunSnapshot> {
     const run = this.store.getRun(runId);
     if (!run) throw notFound(runId);
-    return this.toSnapshot(run);
+
+    // Validate interaction exists
+    const interaction = run.pendingInteractions?.find((i) => i.interaction_id === interactionId);
+    if (!interaction) {
+      throw new RunnerError('NOT_FOUND', 404, `Interaction '${interactionId}' not found`);
+    }
+
+    // Failed ACK cancels the job
+    if (ack.driver_status === 'failed') {
+      this.updateRun(runId, (r) => ({
+        ...r,
+        cancelRequested: true,
+        pendingInteractions: r.pendingInteractions?.filter((i) => i.interaction_id !== interactionId)
+      }));
+      if (this.live?.runId === runId) {
+        this.live.abortController.abort();
+      }
+    } else {
+      // Completed ACK removes the interaction
+      this.updateRun(runId, (r) => ({
+        ...r,
+        pendingInteractions: r.pendingInteractions?.filter((i) => i.interaction_id !== interactionId)
+      }));
+    }
+
+    const updated = this.store.getRun(runId);
+    return this.toSnapshot(updated ?? run);
   }
 
   async shutdown(): Promise<void> {
@@ -250,7 +270,7 @@ export class JobManager {
       contract_version: '1.0',
       created_at: run.createdAt,
       engine: 'pagopa-itwct',
-      pending_interactions: [],
+      pending_interactions: run.pendingInteractions ?? [],
       result_url: `/v1/runs/${run.runId}/result`,
       run_id: run.runId,
       status: run.status,
