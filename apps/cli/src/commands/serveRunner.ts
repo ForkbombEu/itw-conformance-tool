@@ -1,11 +1,10 @@
-import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
 import { ArtifactStore } from '../runner-api/artifacts.js';
 import { JobManager, type ExecuteContext, type ExecutionEvidence } from '../runner-api/job-manager.js';
 import { JobStore } from '../runner-api/job-store.js';
 import { resolveEngineIdentity } from '../runner-api/native-launch.js';
-import { createNativeExecutor, type ProcessAdapter } from '../runner-api/native-worker.js';
+import { createNativeExecutor, processGroupAlive, type ProcessAdapter } from '../runner-api/native-worker.js';
 import { loadProfileCatalogue } from '../runner-api/profiles.js';
 import { createRunnerServer } from '../runner-api/server.js';
 
@@ -41,9 +40,8 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
   const stateDir = resolve(options.stateDir);
 
   const store = new JobStore(stateDir);
-  const ownerToken = randomUUID();
-  if (!store.acquireRootLock(ownerToken)) {
-    throw new Error(`State directory ${stateDir} is already locked by another process`);
+  if (!store.acquireRootLock()) {
+    throw new Error(`State directory ${stateDir} is already locked by another process (${store.lockHolder()})`);
   }
 
   try {
@@ -63,7 +61,12 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
 
       return evidence;
     };
+    // Validate/migrate/index records only after ownership is established.
     const jobManager = new JobManager({ execute, store });
+    for (const record of store.quarantinedRecords()) {
+      process.stderr.write(`Quarantined corrupt run record ${record.file}: ${record.reason}\n`);
+    }
+    jobManager.recoverInterruptedRuns(processGroupAlive);
     const app = createRunnerServer({ artifacts, catalogue, engine: identity.engine, jobManager });
 
     try {
@@ -81,7 +84,7 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
       closing ??= (async () => {
         await app.close();
         await jobManager.shutdown();
-        store.releaseRootLock(ownerToken);
+        store.releaseRootLock();
       })();
       return closing;
     };
@@ -89,7 +92,7 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
     return { close, url };
   } catch (error) {
     // Startup failed after taking ownership: release only our own lock.
-    store.releaseRootLock(ownerToken);
+    store.releaseRootLock();
     throw error;
   }
 }

@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { acknowledgeInteraction, AutomationChannelError, listPendingInteractions } from '@itw-conformance-tool/utils';
 
 import { idempotencyConflict, isTerminalStatus, notFound, resultNotReady, runBusy, RunnerError } from './contract.js';
@@ -24,6 +27,9 @@ function channelErrorToRunnerError(error: unknown, interactionId: string): Runne
 }
 
 const MAX_ERROR_LENGTH = 2_000;
+
+/** Written by the native worker into the run workspace once the child is spawned. */
+export const NATIVE_CHILD_MARKER = 'native-child.json';
 
 /** Why a live run's abort signal fired; set before aborting, never inferred. */
 export type AbortReason = 'cancel' | 'deadline' | 'shutdown';
@@ -367,6 +373,41 @@ export class JobManager {
     return this.toSnapshot(updated ?? run);
   }
 
+  /**
+   * After exclusive ownership of the state root is established, turns every
+   * persisted queued/running/waiting record that no live executor owns into a
+   * truthful terminal `error` with a readable envelope. Refuses (throws) when a
+   * previous native process group of such a run is still alive, rather than
+   * launching new work on top of it.
+   */
+  recoverInterruptedRuns(isProcessGroupAlive: (pid: number) => boolean): string[] {
+    if (!this.store.ownsRootLock()) {
+      throw new Error('Recovery requires exclusive ownership of the state root');
+    }
+    const stranded = this.store
+      .allRuns()
+      .filter((run) => !isTerminalStatus(run.status) && this.live?.runId !== run.runId);
+    for (const run of stranded) {
+      const marker = join(this.store.workDir(run.runId), NATIVE_CHILD_MARKER);
+      if (!existsSync(marker)) continue;
+      const pid = (JSON.parse(readFileSync(marker, 'utf-8')) as { pid?: unknown }).pid;
+      if (typeof pid === 'number' && isProcessGroupAlive(pid)) {
+        throw new Error(
+          `Run ${run.runId}: its previous native process group ${pid} is still alive; stop it before restarting the runner`
+        );
+      }
+    }
+    const finishedAt = this.clock().toISOString();
+    for (const run of stranded) {
+      const reason = `Run interrupted: the runner restarted while the run was ${run.status}.`;
+      const result = run.result
+        ? withLifecycle(run.result, 'error', finishedAt, [reason])
+        : buildErrorResult(run, reason, 'error', finishedAt);
+      this.store.saveRun({ ...run, result, status: 'error', updatedAt: finishedAt });
+    }
+    return stranded.map((run) => run.runId);
+  }
+
   /** Idempotent graceful shutdown: blocks submissions, finalizes and awaits the live run. */
   shutdown(): Promise<void> {
     this.shutdownPromise ??= (async () => {
@@ -376,7 +417,6 @@ export class JobManager {
         await this.awaitCleanup(live);
         this.finalize(live.runId, 'shutdown');
       }
-      this.store.releaseRootLock();
     })();
     return this.shutdownPromise;
   }

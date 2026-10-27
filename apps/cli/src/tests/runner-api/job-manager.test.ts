@@ -204,14 +204,17 @@ describe('JobManager — persistence', () => {
 });
 
 describe('JobManager — root lock', () => {
-  it('second manager denied when lock held', async () => {
+  it('second store is denied while the first owns the lock; manager shutdown never releases it', async () => {
     const mgr1 = new JobManager({ execute: makeFakeExecute(), store });
-    expect(store.acquireRootLock('mgr1')).toBe(true);
+    expect(store.acquireRootLock()).toBe(true);
 
-    // Second manager cannot acquire lock while first holds it
-    expect(store.acquireRootLock('mgr2')).toBe(false);
+    // A second owner cannot acquire the lock while the first holds it
+    expect(new JobStore(dir).acquireRootLock()).toBe(false);
 
+    // Lock ownership belongs to the server composition, not the manager.
     await mgr1.shutdown();
+    expect(store.hasRootLock()).toBe(true);
+    expect(store.releaseRootLock()).toBe(true);
     expect(store.hasRootLock()).toBe(false);
   });
 });

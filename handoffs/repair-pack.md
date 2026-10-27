@@ -167,3 +167,7 @@ Per-task handoffs: `/home/bario/pagopa-followup-20261027/handoffs/Nxx.md`.
 | N15  | NOT RUN                |                              |                                                 |
 
 Live SUT: NOT RUN (no operator SUT/wallet supplied).
+
+### Stale-lock handling (N13)
+
+`<state>/.owner.lock` holds `{token, pid, host, createdAt}` and is created exclusively by `serve-runner` with a fresh random token. Only the store that created it can release it. The runner never deletes an existing lock automatically: startup fails with the holder's pid/host. If the holder is verifiably gone, the operator deletes the lock file manually. Startup also refuses to recover while a stranded run's native process group (`work/<runId>/native-child.json`) is still alive.

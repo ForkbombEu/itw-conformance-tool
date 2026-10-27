@@ -8,6 +8,9 @@ import { JobStore, type StoredRun } from '../../runner-api/job-store.js';
 
 import type { RunRequest } from '../../runner-api/contract.js';
 
+const KEY_HASH_1 = JobStore.keyHash('default', 'key-1');
+const KEY_HASH_2 = JobStore.keyHash('default', 'key-2');
+
 function makeRequest(): RunRequest {
   return {
     category: 'presentation',
@@ -25,7 +28,7 @@ function makeRun(overrides: Partial<StoredRun> = {}): StoredRun {
   return {
     cancelRequested: false,
     createdAt: '2026-01-01T00:00:00Z',
-    idempotencyKeyHash: 'key-hash-1',
+    idempotencyKeyHash: KEY_HASH_1,
     namespace: 'default',
     request,
     requestHash: JobStore.canonicalRequestHash(request),
@@ -69,24 +72,24 @@ describe('JobStore — persist and retrieve', () => {
 describe('JobStore — idempotency index', () => {
   it('finds by key hash', () => {
     store.saveRun(makeRun());
-    expect(store.findByKeyHash('key-hash-1')?.runId).toBe('run-1');
+    expect(store.findByKeyHash(KEY_HASH_1)?.runId).toBe('run-1');
   });
 
   it('rebuilds index from records after crash', () => {
     store.saveRun(makeRun());
-    rmSync(join(dir, 'index', 'key-hash-1.json'), { force: true });
-    expect(store.findByKeyHash('key-hash-1')?.runId).toBe('run-1');
-    expect(existsSync(join(dir, 'index', 'key-hash-1.json'))).toBe(true);
+    rmSync(join(dir, 'index', `${KEY_HASH_1}.json`), { force: true });
+    expect(store.findByKeyHash(KEY_HASH_1)?.runId).toBe('run-1');
+    expect(existsSync(join(dir, 'index', `${KEY_HASH_1}.json`))).toBe(true);
   });
 
   it('rebuildIndex restores all indexes', () => {
     store.saveRun(makeRun());
-    store.saveRun(makeRun({ idempotencyKeyHash: 'key-hash-2', runId: 'run-2' }));
+    store.saveRun(makeRun({ idempotencyKeyHash: KEY_HASH_2, runId: 'run-2' }));
     rmSync(join(dir, 'index'), { force: true, recursive: true });
     mkdirSync(join(dir, 'index'), { recursive: true });
     store.rebuildIndex();
-    expect(store.findByKeyHash('key-hash-1')?.runId).toBe('run-1');
-    expect(store.findByKeyHash('key-hash-2')?.runId).toBe('run-2');
+    expect(store.findByKeyHash(KEY_HASH_1)?.runId).toBe('run-1');
+    expect(store.findByKeyHash(KEY_HASH_2)?.runId).toBe('run-2');
   });
 });
 
@@ -109,17 +112,19 @@ describe('JobStore — canonical hashing', () => {
 
 describe('JobStore — root lock', () => {
   it('acquires and releases', () => {
-    expect(store.acquireRootLock('owner-1')).toBe(true);
+    expect(store.acquireRootLock()).toBe(true);
     expect(store.hasRootLock()).toBe(true);
-    store.releaseRootLock();
+    expect(store.releaseRootLock()).toBe(true);
     expect(store.hasRootLock()).toBe(false);
   });
 
   it('denies second acquisition', () => {
-    expect(store.acquireRootLock('owner-1')).toBe(true);
-    expect(store.acquireRootLock('owner-2')).toBe(false);
+    const other = new JobStore(dir);
+    expect(store.acquireRootLock()).toBe(true);
+    expect(other.acquireRootLock()).toBe(false);
     store.releaseRootLock();
-    expect(store.acquireRootLock('owner-2')).toBe(true);
+    expect(other.acquireRootLock()).toBe(true);
+    other.releaseRootLock();
   });
 });
 
