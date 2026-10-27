@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { z } from 'zod';
@@ -55,26 +55,42 @@ export function writeNativeChildMarker(runRoot: string, pid: number, startedAt: 
 }
 
 export type MarkerRead =
-  { kind: 'absent' } | { kind: 'corrupt'; quarantinedTo: string } | { kind: 'ok'; marker: NativeChildMarker };
+  { kind: 'absent' } | { kind: 'corrupt'; path: string; pid?: number } | { kind: 'ok'; marker: NativeChildMarker };
 
-/** Reads a run's marker; a corrupt one is renamed aside (`.corrupt`) instead of blocking recovery. */
+/**
+ * Reads a run's marker without modifying it. For a corrupt marker the pid is
+ * still extracted from the bytes when possible, so the caller can probe it
+ * before quarantining.
+ */
 export function readNativeChildMarker(runRoot: string): MarkerRead {
   const path = join(runRoot, NATIVE_CHILD_MARKER);
   if (!existsSync(path)) return { kind: 'absent' };
+  const text = readFileSync(path, 'utf-8');
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf-8'));
+    raw = JSON.parse(text);
   } catch {
     raw = undefined;
   }
   const parsed = markerSchema.safeParse(raw);
   if (parsed.success) return { kind: 'ok', marker: parsed.data };
-  const quarantinedTo = `${path}.corrupt`;
-  renameSync(path, quarantinedTo);
-  return { kind: 'corrupt', quarantinedTo };
+  const pid = Number(/"pid"\s*:\s*(\d+)/.exec(text)?.[1]);
+  return { kind: 'corrupt', path, ...(Number.isInteger(pid) && pid > 0 ? { pid } : {}) };
 }
 
-function processGroupExists(pgid: number): boolean {
+/** Moves a corrupt marker aside (`.corrupt`) once it is known not to identify a live group. */
+export function quarantineNativeChildMarker(path: string): string {
+  const target = `${path}.corrupt`;
+  renameSync(path, target);
+  return target;
+}
+
+/** Removes a run's marker; only call once its native group is confirmed gone. */
+export function removeNativeChildMarker(runRoot: string): void {
+  rmSync(join(runRoot, NATIVE_CHILD_MARKER), { force: true });
+}
+
+export function processGroupExists(pgid: number): boolean {
   try {
     process.kill(-pgid, 0);
     return true;

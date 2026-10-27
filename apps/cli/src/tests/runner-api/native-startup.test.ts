@@ -1,5 +1,15 @@
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 
@@ -175,6 +185,9 @@ describe('native startup — real compiled CLI launch boundary', () => {
         readFileSync(join(fixtureA.assetsDir, 'rp/jwks.json'))
       );
 
+      // The native group exited, so its restart-recovery marker was removed.
+      expect(existsSync(join(runRoot, 'native-child.json'))).toBe(false);
+
       // The REAL compiled CLI ran from a cwd outside the Nx tree.
       const log = readFileSync(join(runRoot, 'diagnostics', NATIVE_DIAGNOSTICS_FILENAME), 'utf-8');
       expect(log.trim()).toBe('0.0.1');
@@ -321,6 +334,33 @@ describe('native worker — process hygiene at the real subprocess boundary', ()
     controller.abort();
     await pending;
     expect(() => process.kill(grandchild, 0)).toThrow();
+  }, 30_000);
+
+  it('a failing native-child marker write still terminates and awaits the spawned group (second review finding 2)', async () => {
+    const runRoot = join(outsideRoot, 'marker-failure');
+    mkdirSync(runRoot);
+    let childPid: number | undefined;
+    const adapter: ProcessAdapter = {
+      spawn(_command, _args, options) {
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], options);
+        childPid = child.pid;
+        // The marker write right after spawn now fails (EACCES).
+        chmodSync(runRoot, 0o555);
+        return child;
+      }
+    };
+    const execute = createNativeExecutor({
+      killGraceMs: 2_000,
+      processAdapter: adapter,
+      profile: loadedProfile(fixtureA)
+    });
+    try {
+      await expect(execute(ctxFor(runRoot, new AbortController().signal))).rejects.toThrow();
+    } finally {
+      chmodSync(runRoot, 0o755);
+    }
+    expect(childPid).toBeTypeOf('number');
+    expect(() => process.kill(-(childPid ?? 0), 0)).toThrow();
   }, 30_000);
 
   it('SIGTERM handler closes the runner and releases its own lock', async () => {

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { readScenarioOutcomes } from '@itw-conformance-tool/utils';
 
-import { writeNativeChildMarker } from './native-child-marker.js';
+import { removeNativeChildMarker, writeNativeChildMarker } from './native-child-marker.js';
 import {
   provisionInitializedAssets,
   resolveCliEntry,
@@ -201,33 +201,49 @@ export function createNativeExecutor(
       stdio: 'pipe'
     });
     const finishDiagnostics = captureDiagnostics(child, join(diagnosticsDir, NATIVE_DIAGNOSTICS_FILENAME));
-    // Lets restart recovery detect a native process group that outlived a crashed runner.
-    if (child.pid) {
-      writeNativeChildMarker(runRoot, child.pid, startedAt);
+    const exited = new Promise<null | number>((resolve, reject) => {
+      child.on('exit', (code) => resolve(code));
+      child.on('error', (err) => reject(err));
+    });
+    exited.catch(() => undefined);
+    const ownsGroup = Boolean(child.pid) && process.platform !== 'win32';
+
+    // Lets restart recovery detect a native process group that outlived a
+    // crashed runner. If the marker cannot be written, the child must not be
+    // left running untracked: terminate and await its whole group first.
+    try {
+      if (child.pid) writeNativeChildMarker(runRoot, child.pid, startedAt);
+    } catch (error) {
+      if (child.pid) signalGroup(child.pid, 'SIGTERM');
+      await Promise.race([exited.catch(() => null), new Promise((resolve) => setTimeout(resolve, killGraceMs))]);
+      if (ownsGroup && child.pid) await awaitGroupExit(child.pid, killGraceMs);
+      await finishDiagnostics();
+      throw error;
     }
 
     let onAbort: (() => void) | undefined;
     let escalation: NodeJS.Timeout | undefined;
     let exitCode: null | number;
     try {
-      exitCode = await new Promise<null | number>((resolve, reject) => {
-        child.on('exit', (code) => resolve(code));
-        child.on('error', (err) => reject(err));
-        onAbort = () => {
-          if (!child.pid) return;
-          signalGroup(child.pid, 'SIGTERM');
-          escalation = setTimeout(() => {
-            if (child.pid) signalGroup(child.pid, 'SIGKILL');
-          }, killGraceMs);
-        };
-        if (abortSignal.aborted) onAbort();
-        else abortSignal.addEventListener('abort', onAbort, { once: true });
-      });
+      onAbort = () => {
+        if (!child.pid) return;
+        signalGroup(child.pid, 'SIGTERM');
+        escalation = setTimeout(() => {
+          if (child.pid) signalGroup(child.pid, 'SIGKILL');
+        }, killGraceMs);
+      };
+      if (abortSignal.aborted) onAbort();
+      else abortSignal.addEventListener('abort', onAbort, { once: true });
+      exitCode = await exited;
     } finally {
       if (onAbort) abortSignal.removeEventListener('abort', onAbort);
       clearTimeout(escalation);
       // Services/Vitest share the child's process group; none may outlive the run.
-      if (child.pid && process.platform !== 'win32') await awaitGroupExit(child.pid, killGraceMs);
+      if (ownsGroup && child.pid) {
+        await awaitGroupExit(child.pid, killGraceMs);
+        // Remove the marker only once the whole group is confirmed gone.
+        if (!processGroupAlive(child.pid)) removeNativeChildMarker(runRoot);
+      }
     }
     const { truncated } = await finishDiagnostics();
 

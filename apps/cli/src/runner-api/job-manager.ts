@@ -10,7 +10,14 @@ import {
   runnerResultSchema
 } from './contract.js';
 import { generateRunId, JobStore, type StoredRun } from './job-store.js';
-import { isRecordedNativeGroupAlive, readNativeChildMarker, type NativeChildMarker } from './native-child-marker.js';
+import {
+  isRecordedNativeGroupAlive,
+  processGroupExists,
+  quarantineNativeChildMarker,
+  readNativeChildMarker,
+  removeNativeChildMarker,
+  type NativeChildMarker
+} from './native-child-marker.js';
 import { summarizeWithLimitations } from './summarize.js';
 
 import type { PrivateArtifact } from './artifacts.js';
@@ -406,31 +413,46 @@ export class JobManager {
    * previous native process group of such a run is still alive, rather than
    * launching new work on top of it.
    */
-  recoverInterruptedRuns(isNativeGroupAlive: (marker: NativeChildMarker) => boolean = isRecordedNativeGroupAlive): {
+  recoverInterruptedRuns(
+    isNativeGroupAlive: (marker: NativeChildMarker) => boolean = isRecordedNativeGroupAlive,
+    isCorruptMarkerPidAlive: (pid: number) => boolean = processGroupExists
+  ): {
     diagnostics: string[];
     recovered: string[];
   } {
     if (!this.store.ownsRootLock()) {
       throw new Error('Recovery requires exclusive ownership of the state root');
     }
-    const stranded = this.store
-      .allRuns()
-      .filter((run) => !isTerminalStatus(run.status) && this.live?.runId !== run.runId);
+    const runs = this.store.allRuns().filter((run) => this.live?.runId !== run.runId);
+    const stranded = runs.filter((run) => !isTerminalStatus(run.status));
     const diagnostics: string[] = [];
     const markerNotes = new Map<string, string>();
-    for (const run of stranded) {
-      const read = readNativeChildMarker(this.store.workDir(run.runId));
+    // Every remaining marker is probed, whatever the run status: a cancel or
+    // shutdown can finalize a run after the abort grace while its detached
+    // native group is still alive. A marker is removed only once its group is
+    // confirmed gone, so a refused start is re-checked on the next one.
+    for (const run of runs) {
+      const workDir = this.store.workDir(run.runId);
+      const read = readNativeChildMarker(workDir);
+      if (read.kind === 'absent') continue;
       if (read.kind === 'corrupt') {
-        const note = `Run ${run.runId}: native child marker was unreadable and was quarantined; the previous native process could not be identified.`;
-        diagnostics.push(`${note} (${read.quarantinedTo})`);
+        if (read.pid !== undefined && isCorruptMarkerPidAlive(read.pid)) {
+          throw new Error(
+            `Run ${run.runId}: its native child marker is corrupt but names process group ${read.pid}, which is still alive; stop it before restarting the runner`
+          );
+        }
+        const quarantinedTo = quarantineNativeChildMarker(read.path);
+        const note = `Run ${run.runId}: native child marker was unreadable and was quarantined; its recorded process is not running.`;
+        diagnostics.push(`${note} (${quarantinedTo})`);
         markerNotes.set(run.runId, note);
         continue;
       }
-      if (read.kind === 'ok' && isNativeGroupAlive(read.marker)) {
+      if (isNativeGroupAlive(read.marker)) {
         throw new Error(
           `Run ${run.runId}: its previous native process group ${read.marker.pid} is still alive; stop it before restarting the runner`
         );
       }
+      removeNativeChildMarker(workDir);
     }
     const finishedAt = this.clock().toISOString();
     for (const run of stranded) {

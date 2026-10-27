@@ -101,12 +101,21 @@ export function finalizeEvidence(
   evidence: ExecutionEvidence
 ): ExecutionEvidence {
   const { entries, limitations } = artifacts.finalize(runId, evidence.privateArtifacts);
+  // Evidence that could not be published cannot back a pass.
+  const unpublished = limitations.length > 0 && evidence.result.summary.result === 'pass';
   return {
     privateArtifacts: evidence.privateArtifacts,
     result: {
       ...evidence.result,
       artifacts: entries,
-      limitations: [...evidence.result.limitations, ...limitations]
+      limitations: [
+        ...evidence.result.limitations,
+        ...limitations,
+        ...(unpublished
+          ? ['Summary downgraded from pass to inconclusive: native evidence could not be published.']
+          : [])
+      ],
+      summary: unpublished ? { ...evidence.result.summary, result: 'inconclusive' } : evidence.result.summary
     }
   };
 }

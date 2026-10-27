@@ -4,7 +4,8 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { serveRunner } from '../../commands/serveRunner.js';
+import { finalizeEvidence, serveRunner } from '../../commands/serveRunner.js';
+import { ArtifactStore } from '../../runner-api/artifacts.js';
 import { createOperatorFixture, type OperatorFixture, writeProfilesFile } from './helpers/operator-fixture.js';
 
 let tempDir: string;
@@ -104,5 +105,59 @@ describe('serveRunner', () => {
     const h1 = await serveRunner({ host: '127.0.0.1', port: 0, profiles, stateDir });
     await expect(serveRunner({ host: '127.0.0.1', port: 0, profiles, stateDir })).rejects.toThrow(/locked/);
     await h1.close();
+  });
+});
+
+describe('finalizeEvidence (second review finding 4)', () => {
+  it('downgrades pass to inconclusive when evidence could not be published', () => {
+    const artifacts = new ArtifactStore(join(tempDir, 'state'));
+    const evidence = finalizeEvidence(artifacts, 'run-unpublished', {
+      privateArtifacts: [
+        {
+          artifactId: 'native-results',
+          filename: 'native-results.json',
+          mimeType: 'application/json',
+          path: join(tempDir, 'missing.json')
+        }
+      ],
+      result: {
+        artifacts: [],
+        category: 'presentation',
+        contract_version: '1.0',
+        engine: {
+          fork_repository: 'x',
+          id: 'pagopa-itwct',
+          revision: 'unknown',
+          upstream_repository: 'x',
+          version: 'x'
+        },
+        execution: { finished_at: '2026-01-01T00:00:01Z', started_at: '2026-01-01T00:00:00Z', status: 'completed' },
+        limitations: [],
+        native: {
+          assertions: [
+            {
+              ancestor_titles: [],
+              assertion_id: 'a0001',
+              file: 'f.ts',
+              full_title: 'x',
+              native_status: 'PASS',
+              phase: 'presentation'
+            }
+          ],
+          coverage_mode: 'interoperability',
+          native_suite_status: 'PASSED',
+          scenario_outcomes: [],
+          sessions: []
+        },
+        profile_id: 'test',
+        run_id: 'run-unpublished',
+        selection: { ids: ['WP_RP_HAPPY'] },
+        summary: { assertion_count: 1, native_failed_assertion_count: 0, result: 'pass' },
+        target: { actor_name: 'w', actor_type: 'wallet' }
+      }
+    });
+    expect(evidence.result.artifacts).toEqual([]);
+    expect(evidence.result.summary.result).toBe('inconclusive');
+    expect(evidence.result.limitations.join(' ')).toContain('missing');
   });
 });

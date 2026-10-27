@@ -378,3 +378,46 @@ describe('native child marker robustness (review finding 3)', () => {
     store.releaseRootLock();
   });
 });
+
+describe('second review: markers of terminal runs and corrupt markers (findings 1 and 3)', () => {
+  function liveSleeper() {
+    return spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { detached: true, stdio: 'ignore' });
+  }
+
+  it('a TERMINAL run whose native group is still alive blocks startup (cancel finalized after the grace period)', async () => {
+    const stateDir = freshStateDir();
+    seedLegacyRun(stateDir, 'run-cancelled-orphan', 'orphan-cancel-key', request(), 'completed');
+    const sleeper = liveSleeper();
+    const dir = join(stateDir, 'work', 'run-cancelled-orphan');
+    mkdirSync(dir, { recursive: true });
+    writeNativeChildMarker(dir, sleeper.pid ?? 0, new Date().toISOString());
+    try {
+      await expect(serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir })).rejects.toThrow(
+        /still alive/
+      );
+    } finally {
+      process.kill(-(sleeper.pid ?? 0), 'SIGKILL');
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    // Once the group is confirmed gone the marker is removed and startup proceeds.
+    const handle = await serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir });
+    await handle.close();
+    expect(existsSync(join(dir, 'native-child.json'))).toBe(false);
+  });
+
+  it('a corrupt marker whose pid is still parseable and alive refuses startup', async () => {
+    const stateDir = freshStateDir();
+    seedLegacyRun(stateDir, 'run-corrupt-live', 'corrupt-live-key', request(), 'running');
+    const sleeper = liveSleeper();
+    const dir = join(stateDir, 'work', 'run-corrupt-live');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'native-child.json'), `{"bootId":"x","pid":${sleeper.pid},"startedAt":"2026-`);
+    try {
+      await expect(serveRunner({ host: '127.0.0.1', port: 0, profiles: profilesPath, stateDir })).rejects.toThrow(
+        /still alive/
+      );
+    } finally {
+      process.kill(-(sleeper.pid ?? 0), 'SIGKILL');
+    }
+  });
+});
