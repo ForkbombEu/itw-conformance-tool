@@ -39,6 +39,19 @@ export interface NativeExecutorOptions {
   request: RunRequest;
 }
 
+import { createRequire } from 'node:module';
+
+function resolveCliEntry(): string {
+  // Resolve the compiled CLI entrypoint from the installed module location
+  try {
+    const req = createRequire(import.meta.url);
+    return req.resolve('itw-conformance-cli/dist/main.js');
+  } catch {
+    // Fallback: assume running from source
+    return process.argv[1] ?? 'node';
+  }
+}
+
 const ENGINE_INFO = {
   fork_repository: 'https://github.com/ForkbombEu/itw-conformance-tool',
   id: 'pagopa-itwct',
@@ -70,6 +83,7 @@ export function createNativeExecutor(
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ITWCT_AUTOMATION_DIR: runRoot,
+      ITWCT_CONFIG_PATH: profile.configPath,
       ITWCT_DATA_DIR: dataDir,
       ITWCT_PRESENTATION_SCENARIO_IDS: request.selection.ids.join(','),
       ITWCT_RESULTS_DIR: resultsDir,
@@ -78,9 +92,9 @@ export function createNativeExecutor(
 
     const startedAt = new Date().toISOString();
 
-    // Invoke the actual compiled CLI test presentation command
-    const cliEntry = process.argv[1] ?? 'node';
-    const child = adapter.spawn(cliEntry, ['test', 'presentation', '--verbose'], {
+    // Resolve compiled CLI entrypoint from installed module location
+    const cliEntry = resolveCliEntry();
+    const child = adapter.spawn(process.execPath, [cliEntry, 'test', 'presentation', '--verbose'], {
       cwd: runRoot,
       detached: true,
       env,
