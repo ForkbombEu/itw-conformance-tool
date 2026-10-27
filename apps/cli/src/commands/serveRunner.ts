@@ -57,7 +57,16 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
       profile,
       request: ctx.request
     });
-    return nativeExecutor(ctx as never);
+    const evidence = await nativeExecutor(ctx as never);
+
+    // Register real artifacts
+    for (const artifactPath of evidence.privateArtifactPaths) {
+      const basename = artifactPath.split('/').pop() ?? 'artifact';
+      const artifactId = `${ctx.runId}:${basename}`;
+      artifacts.registerFile(artifactId, basename, 'application/json', artifactPath);
+    }
+
+    return evidence;
   };
   const jobManager = new JobManager({ execute: execute as never, store });
   const app = createRunnerServer({ artifacts, jobManager });

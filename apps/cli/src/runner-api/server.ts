@@ -104,9 +104,15 @@ export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
   });
 
   app.get('/v1/runs/:runId/artifacts/:artifactId', async (req: FastifyRequest, reply: FastifyReply) => {
-    const { artifactId } = req.params as { artifactId: string };
+    const { artifactId, runId } = req.params as { artifactId: string; runId: string };
     if (!isSafeArtifactId(artifactId)) {
       return reply.status(400).send({ error: { code: 'INVALID_REQUEST', message: 'Invalid artifact ID' } });
+    }
+    // Bind run_id and artifact_id
+    if (!artifactId.startsWith(`${runId}:`)) {
+      return reply
+        .status(404)
+        .send({ error: { code: 'NOT_FOUND', message: `Artifact '${artifactId}' not found in run '${runId}'` } });
     }
     const record = deps.artifacts.get(artifactId);
     if (!record) {

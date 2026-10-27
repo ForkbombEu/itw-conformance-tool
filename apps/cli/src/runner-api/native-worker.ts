@@ -163,10 +163,23 @@ export function createNativeExecutor(
       status: exitCode === 0 ? 'completed' : 'completed'
     };
 
+    // Register native export as artifact
+    const artifactId = `${runId}:native-export`;
+    const nativeExportPath = join(resultsDir, 'native-results.json');
+
     return {
-      privateArtifactPaths: [],
+      privateArtifactPaths: [nativeExportPath],
       result: {
-        artifacts: [],
+        artifacts: [
+          {
+            artifact_id: artifactId,
+            download_url: `/v1/runs/${runId}/artifacts/${encodeURIComponent(artifactId)}`,
+            filename: 'native-results.json',
+            mime_type: 'application/json',
+            sha256: '',
+            size_bytes: 0
+          }
+        ],
         category: profile.category,
         contract_version: '1.0',
         engine: { ...ENGINE_INFO, revision: 'unknown', version: '1.0' },
