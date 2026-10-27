@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 
 import { loadConfig, type ConfigSchemaType } from '@itw-conformance-tool/config';
 import { DatabaseClient } from '@itw-conformance-tool/database';
 import { logger } from '@itw-conformance-tool/logger';
 
+import { buildNativeExport, writeNativeExport, type NativeAssertion } from './native-export.js';
+import { extractDescription, extractRequirementId } from './requirement-id.js';
 import { appendCheck, closeSession, createSession } from './session-store.js';
 
 import type { ConformanceCheck, Phase } from './types.js';
@@ -17,20 +20,21 @@ type ReporterTestCase = Parameters<NonNullable<Reporter['onTestCaseResult']>>[0]
 type SessionStatus = 'FAILED' | 'INCOMPLETE' | 'PASSED';
 type TestType = Phase;
 
-// Example IT Wallet Test Matrix IDs -> WP_001
-const REQUIREMENT_ID_PATTERN = /^([A-Z]+[_]\d+\w*)\s*:/;
-
 export class ConformanceReporter implements Reporter {
   private checkResults: CheckResult[] = [];
+  private collectedAssertions: NativeAssertion[] = [];
   private db: DatabaseClient;
   private sessionId: string | undefined;
   private readonly testType: TestType;
   private config: ConfigSchemaType;
+  private runId: string | undefined;
+  private startedAt: string;
 
   constructor(testType: TestType) {
     this.config = loadConfig();
     this.db = new DatabaseClient(this.config.global.data_dir);
     this.testType = testType;
+    this.startedAt = new Date().toISOString();
   }
 
   onTestCaseResult(testCase: ReporterTestCase): void {
@@ -40,10 +44,12 @@ export class ConformanceReporter implements Reporter {
 
     const title = testCase.name;
     const result = this.mapResult(testCase.result().state);
+    const requirementId = extractRequirementId(title);
+    const description = extractDescription(title);
     const check: ConformanceCheck = {
-      description: this.parseTestCaseName(title),
+      description,
       phase: this.testType,
-      requirementId: this.parseRequirementId(title),
+      requirementId: requirementId ?? title,
       result,
       timestamp: new Date().toISOString()
     };
@@ -54,6 +60,19 @@ export class ConformanceReporter implements Reporter {
 
     appendCheck(this.db, this.sessionId, check);
     this.checkResults.push(result);
+
+    // Collect for native export (snake_case to match native-export.ts)
+    if (this.runId) {
+      this.collectedAssertions.push({
+        ancestor_titles: [],
+        file: (testCase as { file?: { name?: string } }).file?.name ?? 'unknown',
+        full_title: title,
+        native_status: result,
+        phase: this.testType,
+        requirement_id: requirementId ?? undefined,
+        vitest_status: testCase.result().state as NativeAssertion['vitest_status']
+      });
+    }
   }
 
   onTestRunEnd(): void {
@@ -66,17 +85,40 @@ export class ConformanceReporter implements Reporter {
     this.db.close();
 
     logger.info(`Conformance session ID: ${this.sessionId}`);
+
+    // Write native export if configured
+    if (this.runId && process.env.ITWCT_RESULTS_DIR) {
+      try {
+        const exportData = buildNativeExport({
+          assertions: this.collectedAssertions,
+          closedAt: new Date().toISOString(),
+          phase: this.testType,
+          runId: this.runId,
+          sessionId: this.sessionId,
+          startedAt: this.startedAt,
+          status
+        });
+        mkdirSync(process.env.ITWCT_RESULTS_DIR, { recursive: true });
+        writeNativeExport(process.env.ITWCT_RESULTS_DIR, exportData);
+        logger.info(`Native export written to ${process.env.ITWCT_RESULTS_DIR}`);
+      } catch (error) {
+        logger.error(`Failed to write native export: ${error}`);
+      }
+    }
   }
 
   onTestRunStart(): void {
     this.sessionId = randomUUID();
     this.checkResults = [];
+    this.collectedAssertions = [];
+    this.runId = process.env.ITWCT_RUN_ID;
+    this.startedAt = new Date().toISOString();
 
     createSession(this.db, {
       entityName: this.config.global.organization_name,
       id: this.sessionId,
       phase: this.testType,
-      startedAt: new Date().toISOString(),
+      startedAt: this.startedAt,
       status: 'OPEN'
     });
   }
@@ -112,15 +154,6 @@ export class ConformanceReporter implements Reporter {
     }
 
     return 'NOT_REACHED';
-  }
-
-  private parseRequirementId(title: string): string {
-    const requirement = REQUIREMENT_ID_PATTERN.exec(title)?.[1];
-    return requirement ?? title;
-  }
-
-  private parseTestCaseName(name: string): string {
-    return name.replace(REQUIREMENT_ID_PATTERN, '').trim();
   }
 
   private resolveFinalStatus(results: readonly CheckResult[]): SessionStatus {

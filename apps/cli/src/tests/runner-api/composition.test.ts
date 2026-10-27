@@ -30,19 +30,19 @@ function makeProducerExport(overrides: Record<string, unknown> = {}) {
   return {
     assertions: [
       {
-        ancestorTitles: ['Suite'],
+        ancestor_titles: [],
         file: 'test.ts',
-        nativeStatus: 'FAIL',
+        full_title: 'WP_082: failing assertion',
+        native_status: 'FAIL',
         phase: 'presentation',
-        requirementId: 'WP_082',
-        title: 'WP_082: failing assertion',
-        vitestStatus: 'failed'
+        requirement_id: 'WP_082',
+        vitest_status: 'failed'
       }
     ],
     closedAt: '2026-01-01T00:00:02Z',
     phase: 'presentation',
-    runId: 'run-1',
-    sessionId: 'session-1',
+    run_id: 'run-1',
+    session_id: 'session-1',
     startedAt: '2026-01-01T00:00:00Z',
     status: 'FAILED',
     ...overrides
@@ -136,7 +136,7 @@ describe('Real composition — producer → adapter → summarizer → API', () 
         mkdirSync(resultsDir, { recursive: true });
         writeFileSync(
           join(resultsDir, 'native-results.json'),
-          JSON.stringify(makeProducerExport({ runId: ctx.runId }))
+          JSON.stringify(makeProducerExport({ run_id: ctx.runId }))
         );
 
         const artifactId = `${ctx.runId}:native-export`;
@@ -229,7 +229,7 @@ describe('Real composition — producer → adapter → summarizer → API', () 
   it('stale export rejected', async () => {
     const { validateAndAdaptNativeExport } = await import('../../runner-api/native-result-adapter.js');
     try {
-      validateAndAdaptNativeExport(makeProducerExport({ runId: 'OLD' }), { expectedRunId: 'NEW' });
+      validateAndAdaptNativeExport(makeProducerExport({ run_id: 'OLD' }), { expectedRunId: 'NEW' });
       expect.unreachable('should have thrown');
     } catch (e) {
       expect((e as { code?: string }).code).toBe('RUN_ID_MISMATCH');

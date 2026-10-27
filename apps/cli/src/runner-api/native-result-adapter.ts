@@ -1,17 +1,18 @@
 import { z } from 'zod';
 
+// Schema for THIS repo's producer format (native-export.ts emits snake_case)
 const nativeAssertionSchema = z
   .object({
-    ancestorTitles: z.array(z.string()),
-    description: z.string().optional(),
-    errorMessage: z.string().nullish(),
+    ancestor_titles: z.array(z.string()),
+    credential_configuration_id: z.string().optional(),
+    error_message: z.string().optional(),
     file: z.string(),
-    nativeStatus: z.enum(['FAIL', 'NOT_REACHED', 'PASS']),
+    full_title: z.string(),
+    native_status: z.enum(['FAIL', 'NOT_REACHED', 'PASS']),
     phase: z.string(),
-    requirementId: z.string().nullish(),
-    timestamp: z.string().optional(),
-    title: z.string(),
-    vitestStatus: z.enum(['failed', 'passed', 'pending', 'skipped']).optional()
+    raw: z.string().optional(),
+    requirement_id: z.string().optional(),
+    vitest_status: z.string().optional()
   })
   .strict();
 
@@ -20,10 +21,10 @@ export const nativeExportSchema = z
     assertions: z.array(nativeAssertionSchema),
     closedAt: z.string().nullish(),
     phase: z.string(),
-    runId: z.string(),
-    sessionId: z.string(),
+    run_id: z.string(),
+    session_id: z.string(),
     startedAt: z.string(),
-    status: z.enum(['FAILED', 'INCOMPLETE', 'OPEN', 'PASSED'])
+    status: z.string()
   })
   .strict();
 
@@ -66,25 +67,28 @@ export function validateAndAdaptNativeExport(
 
   const data = parsed.data;
 
-  if (data.runId !== options.expectedRunId) {
+  // Validate run ID matches
+  if (data.run_id !== options.expectedRunId) {
     throw new NativeExportValidationError(
       'RUN_ID_MISMATCH',
-      `Native export runId '${data.runId}' does not match expected '${options.expectedRunId}'`
+      `Native export run_id '${data.run_id}' does not match expected '${options.expectedRunId}'`
     );
   }
 
+  // Map to wire assertions (already snake_case from producer)
   const assertions: AdaptedAssertion[] = data.assertions.map((a, index) => ({
-    ancestor_titles: a.ancestorTitles,
+    ancestor_titles: a.ancestor_titles,
     assertion_id: `assertion-${index}`,
-    error_message: a.errorMessage ?? undefined,
+    credential_configuration_id: a.credential_configuration_id,
+    error_message: a.error_message,
     file: a.file,
-    full_title: a.title,
-    native_status: a.nativeStatus,
+    full_title: a.full_title,
+    native_status: a.native_status,
     phase: a.phase,
-    raw: JSON.stringify(a),
-    requirement_id: a.requirementId ?? undefined,
-    vitest_status: a.vitestStatus
+    raw: a.raw ?? JSON.stringify(a),
+    requirement_id: a.requirement_id,
+    vitest_status: a.vitest_status
   }));
 
-  return { assertions, sessionId: data.sessionId, status: data.status };
+  return { assertions, sessionId: data.session_id, status: data.status };
 }
