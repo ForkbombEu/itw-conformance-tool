@@ -45,21 +45,13 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
   }
 
   try {
-    const artifacts = new ArtifactStore();
+    const artifacts = new ArtifactStore(stateDir);
     const execute = async (ctx: ExecuteContext): Promise<ExecutionEvidence> => {
       const profile = catalogue.get(ctx.request.profile_id);
       if (!profile) throw new Error(`Unknown profile_id '${ctx.request.profile_id}'`);
       const nativeExecutor = createNativeExecutor({ processAdapter: options.processAdapter, profile });
       const evidence = await nativeExecutor(ctx);
-
-      // Register real artifacts
-      for (const artifactPath of evidence.privateArtifactPaths) {
-        const basename = artifactPath.split('/').pop() ?? 'artifact';
-        const artifactId = `${ctx.runId}:${basename}`;
-        artifacts.registerFile(artifactId, basename, 'application/json', artifactPath);
-      }
-
-      return evidence;
+      return finalizeEvidence(artifacts, ctx.runId, evidence);
     };
     // Validate/migrate/index records only after ownership is established.
     const jobManager = new JobManager({ execute, store });
@@ -95,6 +87,27 @@ export async function serveRunner(options: ServeRunnerOptions): Promise<ServeRun
     store.releaseRootLock();
     throw error;
   }
+}
+
+/**
+ * Production artifact finalization: publishes the worker's raw evidence files
+ * through the persistent artifact store and returns the result carrying
+ * exactly those manifest entries (no private paths).
+ */
+export function finalizeEvidence(
+  artifacts: ArtifactStore,
+  runId: string,
+  evidence: ExecutionEvidence
+): ExecutionEvidence {
+  const { entries, limitations } = artifacts.finalize(runId, evidence.privateArtifacts);
+  return {
+    privateArtifacts: evidence.privateArtifacts,
+    result: {
+      ...evidence.result,
+      artifacts: entries,
+      limitations: [...evidence.result.limitations, ...limitations]
+    }
+  };
 }
 
 /** Closes the runner on SIGINT/SIGTERM so owned locks, listeners and native children are cleaned up. */

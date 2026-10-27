@@ -29,7 +29,7 @@ function makeRequest(): RunRequest {
 
 function makeFakeExecute(): ExecuteFn {
   return async () => ({
-    privateArtifactPaths: [],
+    privateArtifacts: [],
     result: {
       artifacts: [],
       category: 'presentation',
@@ -60,7 +60,7 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wct-srv-'));
   process.env.CREDIMI_RUNNER_TOKEN = TOKEN;
   const store = new JobStore(dir);
-  const artifacts = new ArtifactStore();
+  const artifacts = new ArtifactStore(dir);
   const jobManager = new JobManager({ execute: makeFakeExecute(), store });
   app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
   await app.ready();

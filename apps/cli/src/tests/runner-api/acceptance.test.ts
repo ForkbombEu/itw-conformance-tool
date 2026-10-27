@@ -39,6 +39,7 @@ function makeResult(overrides: Partial<RunnerResult> = {}): RunnerResult {
       assertions: [
         {
           ancestor_titles: [],
+          assertion_id: 'a0001',
           file: 't.ts',
           full_title: 'WP_082: test',
           native_status: 'PASS',
@@ -85,6 +86,7 @@ describe('Acceptance — full API/job/export integration', () => {
           assertions: [
             {
               ancestor_titles: [],
+              assertion_id: 'a0002',
               file: 't.ts',
               full_title: 'WP_082: test',
               native_status: 'PASS',
@@ -96,11 +98,11 @@ describe('Acceptance — full API/job/export integration', () => {
           status: 'PASSED'
         })
       );
-      return { privateArtifactPaths: [], result: makeResult({ run_id: ctx.runId }) };
+      return { privateArtifacts: [], result: makeResult({ run_id: ctx.runId }) };
     };
 
     const store = new JobStore(dir);
-    const artifacts = new ArtifactStore();
+    const artifacts = new ArtifactStore(dir);
     const jobManager = new JobManager({ execute, store });
     const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
@@ -153,6 +155,7 @@ describe('Acceptance — full API/job/export integration', () => {
           assertions: [
             {
               ancestor_titles: [],
+              assertion_id: 'a0003',
               file: 't.ts',
               full_title: 'WP_082: test',
               native_status: 'FAIL',
@@ -165,12 +168,13 @@ describe('Acceptance — full API/job/export integration', () => {
         })
       );
       return {
-        privateArtifactPaths: [],
+        privateArtifacts: [],
         result: makeResult({
           native: {
             assertions: [
               {
                 ancestor_titles: [],
+                assertion_id: 'a0004',
                 file: 't.ts',
                 full_title: 'WP_082: test',
                 native_status: 'FAIL',
@@ -190,7 +194,7 @@ describe('Acceptance — full API/job/export integration', () => {
     };
 
     const store = new JobStore(dir);
-    const artifacts = new ArtifactStore();
+    const artifacts = new ArtifactStore(dir);
     const jobManager = new JobManager({ execute, store });
     const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
@@ -218,7 +222,7 @@ describe('Acceptance — full API/job/export integration', () => {
 
   it('missing export = error, not pass', async () => {
     const execute: ExecuteFn = async () => ({
-      privateArtifactPaths: [],
+      privateArtifacts: [],
       result: makeResult({
         execution: { error: 'missing export', started_at: '2026-01-01T00:00:00Z', status: 'error' },
         native: {
@@ -233,7 +237,7 @@ describe('Acceptance — full API/job/export integration', () => {
     });
 
     const store = new JobStore(dir);
-    const artifacts = new ArtifactStore();
+    const artifacts = new ArtifactStore(dir);
     const jobManager = new JobManager({ execute, store });
     const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
@@ -263,11 +267,11 @@ describe('Acceptance — full API/job/export integration', () => {
     const execute: ExecuteFn = async () => {
       spawnCount++;
       await new Promise((r) => setTimeout(r, 200));
-      return { privateArtifactPaths: [], result: makeResult() };
+      return { privateArtifacts: [], result: makeResult() };
     };
 
     const store = new JobStore(dir);
-    const artifacts = new ArtifactStore();
+    const artifacts = new ArtifactStore(dir);
     const jobManager = new JobManager({ execute, store });
     const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
     await app.ready();
@@ -314,10 +318,10 @@ describe('Acceptance — full API/job/export integration', () => {
   it('sentinel private file is not exposed by any route', async () => {
     const secretFile = join(dir, 'secret.txt');
     writeFileSync(secretFile, 'SENTINEL_SECRET_VALUE');
-    const artifacts = new ArtifactStore();
+    const artifacts = new ArtifactStore(dir);
     const store = new JobStore(dir);
     const jobManager = new JobManager({
-      execute: async () => ({ privateArtifactPaths: [], result: makeResult() }),
+      execute: async () => ({ privateArtifacts: [], result: makeResult() }),
       store
     });
     const app = createRunnerServer({ artifacts, catalogue: stubCatalogue(), engine: TEST_ENGINE, jobManager });
@@ -326,7 +330,7 @@ describe('Acceptance — full API/job/export integration', () => {
     // Try to access the secret file through artifact route
     const res = await app.inject({
       method: 'GET',
-      url: `/v1/runs/run-1/artifacts/${encodeURIComponent('run-1:secret.txt')}`,
+      url: `/v1/runs/run-1/artifacts/${'secret.txt'}`,
       headers: { authorization: `Bearer ${TOKEN}` }
     });
     expect(res.statusCode).toBe(404);

@@ -47,7 +47,7 @@ function makeResult(): RunnerResult {
 
 function makeFakeExecute(): ExecuteFn {
   return vi.fn().mockResolvedValue({
-    privateArtifactPaths: [],
+    privateArtifacts: [],
     result: makeResult()
   }) as unknown as ExecuteFn;
 }
@@ -56,7 +56,7 @@ function makeSlowExecute(delayMs: number): ExecuteFn {
   return vi.fn().mockImplementation(
     (ctx: { abortSignal: AbortSignal }) =>
       new Promise((resolve, reject) => {
-        const timer = setTimeout(() => resolve({ privateArtifactPaths: [], result: makeResult() }), delayMs);
+        const timer = setTimeout(() => resolve({ privateArtifacts: [], result: makeResult() }), delayMs);
         ctx.abortSignal.addEventListener('abort', () => {
           clearTimeout(timer);
           reject(new Error('aborted'));

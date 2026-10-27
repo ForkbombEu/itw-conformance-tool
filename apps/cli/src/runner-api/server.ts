@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
-import { ArtifactStore, isSafeArtifactId } from './artifacts.js';
+import { ArtifactStore, ArtifactUnavailableError, isSafeArtifactId } from './artifacts.js';
 import { invalidRequest, RunnerError, runRequestSchema } from './contract.js';
 
 import type { RunRequest, RunnerResult } from './contract.js';
@@ -116,20 +116,28 @@ export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
     if (!isSafeArtifactId(artifactId)) {
       return reply.status(400).send({ error: { code: 'INVALID_REQUEST', message: 'Invalid artifact ID' } });
     }
-    // Bind run_id and artifact_id
-    if (!artifactId.startsWith(`${runId}:`)) {
+    // Lookup binds BOTH the run ID and the artifact ID to the run's persisted manifest.
+    let record;
+    try {
+      record = deps.artifacts.get(runId, artifactId);
+    } catch (error) {
+      if (error instanceof ArtifactUnavailableError) {
+        return reply
+          .status(error.code === 'ARTIFACT_MISSING' ? 410 : 500)
+          .send({ error: { code: error.code, message: error.message } });
+      }
+      throw error;
+    }
+    if (!record) {
       return reply
         .status(404)
         .send({ error: { code: 'NOT_FOUND', message: `Artifact '${artifactId}' not found in run '${runId}'` } });
     }
-    const record = deps.artifacts.get(artifactId);
-    if (!record) {
-      return reply.status(404).send({ error: { code: 'NOT_FOUND', message: `Artifact '${artifactId}' not found` } });
-    }
     return reply
       .status(200)
-      .header('Content-Type', record.contentType)
-      .header('X-Content-SHA256', record.sha256)
+      .header('Content-Type', record.entry.mime_type)
+      .header('Content-Length', String(record.entry.size_bytes))
+      .header('X-Content-SHA256', record.entry.sha256)
       .send(record.content);
   });
 

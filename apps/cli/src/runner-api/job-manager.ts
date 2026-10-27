@@ -3,10 +3,19 @@ import { join } from 'node:path';
 
 import { acknowledgeInteraction, AutomationChannelError, listPendingInteractions } from '@itw-conformance-tool/utils';
 
-import { idempotencyConflict, isTerminalStatus, notFound, resultNotReady, runBusy, RunnerError } from './contract.js';
+import {
+  idempotencyConflict,
+  isTerminalStatus,
+  notFound,
+  resultNotReady,
+  runBusy,
+  RunnerError,
+  runnerResultSchema
+} from './contract.js';
 import { generateRunId, JobStore, type StoredRun } from './job-store.js';
 import { summarizeWithLimitations } from './summarize.js';
 
+import type { PrivateArtifact } from './artifacts.js';
 import type { PendingInteraction, RunRequest, RunSnapshot, RunnerResult, RunStatus } from './contract.js';
 import type { AckOutcome } from '@itw-conformance-tool/utils';
 
@@ -45,6 +54,23 @@ const REASON_LIMITATION: Record<AbortReason, string> = {
   deadline: 'Run reached its deadline before the native suite finished; only partial evidence is available.',
   shutdown: 'Run was interrupted by a runner shutdown; only partial evidence is available.'
 };
+
+/**
+ * The publication boundary: every terminal result must parse with the wire
+ * schema. An invalid one is replaced by an honest error envelope that keeps
+ * the lifecycle status and names the schema violations.
+ */
+function publishable(run: StoredRun, result: RunnerResult, finishedAt: string): RunnerResult {
+  const parsed = runnerResultSchema.safeParse(result);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+    .join('; ');
+  const status = result.execution.status as RunStatus;
+  const envelope = buildErrorResult(run, `Worker result failed wire validation: ${issues}`, status, finishedAt);
+  return { ...envelope, execution: { ...envelope.execution, status } };
+}
 
 function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR_LENGTH);
@@ -103,7 +129,8 @@ function withLifecycle(
 }
 
 export interface ExecutionEvidence {
-  privateArtifactPaths: string[];
+  /** Raw evidence files at private paths; the composition publishes them as artifacts. */
+  privateArtifacts: PrivateArtifact[];
   result: RunnerResult;
 }
 
@@ -285,7 +312,7 @@ export class JobManager {
       result = buildErrorResult(current, `Infrastructure error: ${errorMessage(failure)}`, status, finishedAt);
     }
 
-    this.store.saveRun({ ...current, result, status, updatedAt: finishedAt });
+    this.store.saveRun({ ...current, result: publishable(current, result, finishedAt), status, updatedAt: finishedAt });
   }
 
   async getSnapshot(runId: string): Promise<RunSnapshot> {
@@ -301,7 +328,11 @@ export class JobManager {
     if (!run.result) {
       throw new RunnerError('RESULT_UNAVAILABLE', 409, 'Terminal run has no readable result');
     }
-    return run.result;
+    const parsed = runnerResultSchema.safeParse(run.result);
+    if (!parsed.success) {
+      throw new RunnerError('RESULT_INVALID', 500, 'Stored result does not satisfy the v1.0 wire schema');
+    }
+    return parsed.data;
   }
 
   /** Idempotent cancellation; returns once the run has a readable terminal result. */

@@ -255,7 +255,13 @@ describe('native-worker — real ConformanceReporter child', () => {
     expect(result.native.sessions[0]?.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(result.engine.revision).toBe('unknown');
     expect(result.limitations.some((l) => l.includes('engine.revision is unknown'))).toBe(true);
-    expect(evidence.privateArtifactPaths[0]).toBe(join(runRoot, 'results', 'native-results.json'));
+    expect(evidence.privateArtifacts[0]).toEqual({
+      artifactId: 'native-results',
+      filename: 'native-results.json',
+      mimeType: 'application/json',
+      path: join(runRoot, 'results', 'native-results.json')
+    });
+    expect(result.artifacts).toEqual([]);
     expect(nativeAssertionsAreWireValid(result)).toBe(true);
   }, 60_000);
 

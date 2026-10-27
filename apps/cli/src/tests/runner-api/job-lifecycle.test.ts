@@ -57,7 +57,7 @@ function evidence(
 ): ExecutionEvidence {
   const failed = assertions.filter((a) => a.native_status === 'FAIL').length;
   return {
-    privateArtifactPaths: [],
+    privateArtifacts: [],
     result: {
       artifacts,
       category: 'presentation',

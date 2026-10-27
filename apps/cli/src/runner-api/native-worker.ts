@@ -15,6 +15,7 @@ import { validateAndAdaptNativeExport, type AdaptedNativeExport } from './native
 import { assertSelectionAllowed } from './profiles.js';
 import { summarizeWithLimitations } from './summarize.js';
 
+import type { PrivateArtifact } from './artifacts.js';
 import type { RunRequest, RunnerResult } from './contract.js';
 import type { LoadedProfile } from './profiles.js';
 import type { Readable } from 'node:stream';
@@ -62,9 +63,12 @@ export interface NativeExecuteContext {
 }
 
 export interface NativeEvidence {
-  privateArtifactPaths: string[];
+  privateArtifacts: PrivateArtifact[];
   result: RunnerResult;
 }
+
+/** Stable run-scoped ID of the raw native export artifact. */
+export const NATIVE_EXPORT_ARTIFACT_ID = 'native-results';
 
 /** File name the native ConformanceReporter publishes into ITWCT_RESULTS_DIR. */
 export const NATIVE_EXPORT_FILENAME = 'native-results.json';
@@ -240,7 +244,7 @@ export function createNativeExecutor(
     // producer format and adapt it; never trust or cast unvalidated JSON.
     const exportPath = join(resultsDir, NATIVE_EXPORT_FILENAME);
     if (!existsSync(exportPath)) {
-      return { privateArtifactPaths: [], result: errorResult('Native export is missing') };
+      return { privateArtifacts: [], result: errorResult('Native export is missing') };
     }
 
     let adapted: AdaptedNativeExport;
@@ -253,7 +257,10 @@ export function createNativeExecutor(
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       // Keep the raw bytes as evidence even though they were rejected.
-      return { privateArtifactPaths: [exportPath], result: errorResult(`Native export rejected: ${reason}`) };
+      return {
+        privateArtifacts: [nativeExportArtifact(exportPath)],
+        result: errorResult(`Native export rejected: ${reason}`)
+      };
     }
 
     const outcomes = readSelectedScenarioOutcomes(runRoot, runId, request.selection.ids);
@@ -279,22 +286,11 @@ export function createNativeExecutor(
       assertionScenarios: adapted.assertionScenarios
     });
 
-    // Register native export as artifact
-    const artifactId = `${runId}:native-export`;
-
     return {
-      privateArtifactPaths: [exportPath],
+      // Published (hashed, persisted) by the composition's artifact store.
+      privateArtifacts: [nativeExportArtifact(exportPath)],
       result: {
-        artifacts: [
-          {
-            artifact_id: artifactId,
-            download_url: `/v1/runs/${runId}/artifacts/${encodeURIComponent(artifactId)}`,
-            filename: NATIVE_EXPORT_FILENAME,
-            mime_type: 'application/json',
-            sha256: '',
-            size_bytes: 0
-          }
-        ],
+        artifacts: [],
         category: profile.category,
         contract_version: '1.0',
         engine: identity.engine,
@@ -313,6 +309,15 @@ export function createNativeExecutor(
         target: request.target
       }
     };
+  };
+}
+
+function nativeExportArtifact(path: string): PrivateArtifact {
+  return {
+    artifactId: NATIVE_EXPORT_ARTIFACT_ID,
+    filename: NATIVE_EXPORT_FILENAME,
+    mimeType: 'application/json',
+    path
   };
 }
 
