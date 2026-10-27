@@ -1,7 +1,37 @@
 import { idempotencyConflict, isTerminalStatus, notFound, resultNotReady, runBusy, RunnerError } from './contract.js';
 import { generateRunId, JobStore, type StoredRun } from './job-store.js';
 
-import type { RunRequest, RunSnapshot, RunnerResult } from './contract.js';
+import type { RunRequest, RunSnapshot, RunnerResult, RunStatus } from './contract.js';
+
+function buildErrorResult(run: StoredRun, error: unknown): RunnerResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    artifacts: [],
+    category: run.request.category,
+    contract_version: '1.0',
+    engine: {
+      fork_repository: 'https://github.com/ForkbombEu/itw-conformance-tool',
+      id: 'pagopa-itwct',
+      revision: 'unknown',
+      upstream_repository: 'https://github.com/pagopa/itw-conformance-tool',
+      version: 'unknown'
+    },
+    execution: { error: message, started_at: run.createdAt, status: 'error' },
+    limitations: ['Infrastructure error: ' + message],
+    native: {
+      assertions: [],
+      coverage_mode: 'interoperability',
+      native_suite_status: 'ERROR',
+      scenario_outcomes: [],
+      sessions: []
+    },
+    profile_id: run.request.profile_id,
+    run_id: run.runId,
+    selection: run.request.selection,
+    summary: { assertion_count: 0, native_failed_assertion_count: 0, result: 'not_tested' },
+    target: run.request.target
+  };
+}
 
 export interface ExecutionEvidence {
   privateArtifactPaths: string[];
@@ -107,25 +137,37 @@ export class JobManager {
   private async runExecution(run: StoredRun, abortController: AbortController): Promise<void> {
     this.updateRun(run.runId, (r) => ({ ...r, status: 'running' }));
 
+    // Install deadline timer
+    const timeoutMs = run.request.timeout_ms ?? 600_000;
+    const deadlineTimer = setTimeout(() => abortController.abort(), timeoutMs);
+
     try {
+      const runRoot = this.store.workDir(run.runId);
       const evidence = await this.execute({
         abortSignal: abortController.signal,
         request: run.request,
         runId: run.runId,
-        runRoot: this.store.rootDir
+        runRoot
       });
+
+      clearTimeout(deadlineTimer);
 
       const current = this.store.getRun(run.runId);
       if (current && isTerminalStatus(current.status)) return;
       if (current?.cancelRequested) return;
 
       this.updateRun(run.runId, (r) => ({ ...r, result: evidence.result, status: 'completed' }));
-    } catch {
+    } catch (error) {
+      clearTimeout(deadlineTimer);
+
       const current = this.store.getRun(run.runId);
       if (current && isTerminalStatus(current.status)) return;
       if (current?.cancelRequested) return;
 
-      this.updateRun(run.runId, (r) => ({ ...r, status: 'error' }));
+      const isTimeout = abortController.signal.aborted;
+      const terminalStatus: RunStatus = isTimeout ? 'timed_out' : 'error';
+      const errorResult = buildErrorResult(run, error);
+      this.updateRun(run.runId, (r) => ({ ...r, result: errorResult, status: terminalStatus }));
     }
   }
 

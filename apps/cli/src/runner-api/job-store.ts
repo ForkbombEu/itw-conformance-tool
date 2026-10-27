@@ -1,5 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  writeSync
+} from 'node:fs';
 import { join } from 'node:path';
 
 import type { RunRequest, RunStatus } from './contract.js';
@@ -43,7 +54,7 @@ export class JobStore {
   }
 
   static canonicalRequestHash(request: RunRequest): string {
-    const canonical = JSON.stringify(request, Object.keys(request).sort());
+    const canonical = JSON.stringify(sortKeysDeep(request));
     return createHash('sha256').update(canonical).digest('hex');
   }
 
@@ -114,20 +125,46 @@ export class JobStore {
 
   acquireRootLock(ownerId: string): boolean {
     const lockPath = join(this.rootDir, '.owner.lock');
-    if (existsSync(lockPath)) return false;
-    writeFileSync(lockPath, ownerId, 'utf-8');
-    return true;
+    try {
+      const fd = openSync(lockPath, 'wx');
+      writeSync(fd, ownerId);
+      closeSync(fd);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  releaseRootLock(): void {
-    rmSync(join(this.rootDir, '.owner.lock'), { force: true });
+  releaseRootLock(ownerToken?: string): void {
+    const lockPath = join(this.rootDir, '.owner.lock');
+    if (ownerToken && existsSync(lockPath)) {
+      const current = readFileSync(lockPath, 'utf-8');
+      if (current !== ownerToken) return;
+    }
+    rmSync(lockPath, { force: true });
   }
 
   hasRootLock(): boolean {
     return existsSync(join(this.rootDir, '.owner.lock'));
   }
+
+  workDir(runId: string): string {
+    return join(this.rootDir, 'work', runId);
+  }
 }
 
 export function generateRunId(): string {
   return randomUUID();
+}
+
+function sortKeysDeep(obj: unknown): unknown {
+  if (Array.isArray(obj)) return obj.map(sortKeysDeep);
+  if (obj !== null && typeof obj === 'object') {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) {
+      sorted[key] = sortKeysDeep((obj as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return obj;
 }
