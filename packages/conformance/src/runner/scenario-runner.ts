@@ -592,6 +592,19 @@ export function createProtocolObservedScenarioRunner(
   const verbose = options.verbose ?? process.env.ITWCT_CONFORMANCE_VERBOSE === '1';
   const activeSessions = new Set<InteractiveScenarioSession>();
 
+  // Auto-install file engagement driver when automation env is set
+  let engagementDriver: EngagementDriver | undefined = options.engagementDriver;
+  const automationDir = process.env.ITWCT_AUTOMATION_DIR;
+  const runId = process.env.ITWCT_RUN_ID;
+  if (!engagementDriver && automationDir && runId) {
+    const { createFileEngagementDriver } = require('./file-engagement-driver.js') as {
+      createFileEngagementDriver: (o: { automationDir: string; runId: string }) => EngagementDriver;
+    };
+    engagementDriver = createFileEngagementDriver({ automationDir, runId });
+  } else if (!engagementDriver && (automationDir || runId)) {
+    throw new Error('Both ITWCT_AUTOMATION_DIR and ITWCT_RUN_ID must be set for automation mode');
+  }
+
   return {
     async start(id, startOptions = {}) {
       if (startOptions.signal?.aborted) throw new Error(`Scenario ${id} start aborted`);
@@ -766,7 +779,7 @@ export function createProtocolObservedScenarioRunner(
           async showInstructions() {
             // Driver branch: publish a single typed interaction and return
             // immediately. Do NOT await wallet ACK or protocol completion.
-            if (options.engagementDriver) {
+            if (engagementDriver) {
               if (!interactionPublished) {
                 interactionPublished = true;
                 const expiresAt = new Date(Date.now() + definition.timeouts.testerActionMs).toISOString();
@@ -789,7 +802,7 @@ export function createProtocolObservedScenarioRunner(
                         : stimulus.uri
                 };
                 activeInteractionId = interaction.interactionId;
-                await options.engagementDriver.publish(interaction);
+                await engagementDriver.publish(interaction);
               }
               return;
             }
@@ -903,8 +916,8 @@ export function createProtocolObservedScenarioRunner(
               timings: createTimings(startedAt)
             });
             writeOutcome(outcome, write);
-            if (options.engagementDriver?.recordOutcome) {
-              await options.engagementDriver.recordOutcome(outcome);
+            if (engagementDriver?.recordOutcome) {
+              await engagementDriver.recordOutcome(outcome);
             }
             return outcome;
           },
@@ -918,8 +931,8 @@ export function createProtocolObservedScenarioRunner(
             activeSessions.delete(session);
             if (!outcome) write(`Scenario ${definition.id} stopped before verdict.`);
             // Close interaction in finally, even after an exception.
-            if (activeInteractionId && options.engagementDriver) {
-              await options.engagementDriver.close(activeInteractionId).catch(() => undefined);
+            if (activeInteractionId && engagementDriver) {
+              await engagementDriver.close(activeInteractionId).catch(() => undefined);
               activeInteractionId = undefined;
             }
             // Deactivate last so any deactivation failure still surfaces to the caller.
