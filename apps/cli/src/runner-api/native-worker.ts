@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { readScenarioOutcomes } from '@itw-conformance-tool/utils';
+
 import {
   provisionInitializedAssets,
   resolveCliEntry,
@@ -249,11 +251,13 @@ export function createNativeExecutor(
       return { privateArtifactPaths: [exportPath], result: errorResult(`Native export rejected: ${reason}`) };
     }
 
+    const outcomes = readSelectedScenarioOutcomes(runRoot, runId, request.selection.ids);
+
     const native: RunnerResult['native'] = {
       assertions: adapted.assertions,
       coverage_mode: profile.coverageMode,
       native_suite_status: adapted.status,
-      scenario_outcomes: [],
+      scenario_outcomes: outcomes.scenarioOutcomes,
       sessions: [{ id: adapted.sessionId, status: adapted.status }]
     };
 
@@ -293,6 +297,7 @@ export function createNativeExecutor(
         limitations: [
           ...limitations,
           ...adapted.errors.map((message) => `Native error outside test bodies: ${message}`),
+          ...outcomes.limitations,
           ...baseLimitations
         ],
         native,
@@ -304,6 +309,29 @@ export function createNativeExecutor(
       }
     };
   };
+}
+
+/** Native scenario verdicts the file engagement driver persisted for the selected scenarios. */
+function readSelectedScenarioOutcomes(
+  runRoot: string,
+  runId: string,
+  selectedIds: readonly string[]
+): { limitations: string[]; scenarioOutcomes: RunnerResult['native']['scenario_outcomes'] } {
+  const { invalid, outcomes } = readScenarioOutcomes(runRoot, runId);
+  const limitations: string[] = [];
+  if (invalid > 0) limitations.push(`${invalid} native scenario outcome record(s) were malformed and ignored.`);
+  const unselected = outcomes.filter((outcome) => !selectedIds.includes(outcome.scenarioId));
+  if (unselected.length > 0) {
+    limitations.push(
+      `Ignored native outcomes for unselected scenarios: ${unselected.map((o) => o.scenarioId).join(', ')}.`
+    );
+  }
+  const scenarioOutcomes = outcomes
+    .filter((outcome) => selectedIds.includes(outcome.scenarioId))
+    .map((outcome) => ({ scenario_id: outcome.scenarioId, verdict: outcome.verdict }));
+  const missing = selectedIds.filter((id) => !scenarioOutcomes.some((outcome) => outcome.scenario_id === id));
+  if (missing.length > 0) limitations.push(`No native scenario verdict was recorded for: ${missing.join(', ')}.`);
+  return { limitations, scenarioOutcomes };
 }
 
 interface ErrorResultInput {

@@ -13,3 +13,21 @@ export { INTERNAL_SERVICE_REQUEST_HEADER, isInternalServiceRequest } from './int
 export * from './json-schema.js';
 export * from './result.js';
 export * from './matchers.js';
+export {
+  acknowledgeInteraction,
+  AutomationChannelError,
+  closeInteraction,
+  listPendingInteractions,
+  MAX_PENDING_INTERACTIONS,
+  publishInteraction,
+  readAck,
+  readScenarioOutcomes,
+  recordScenarioOutcome,
+  type AckOutcome,
+  type ChannelAck,
+  type ChannelErrorCode,
+  type ChannelInteraction,
+  type ChannelOutcome,
+  type PendingInteractionsView,
+  type ScenarioOutcomesView
+} from './automation-channel.js';

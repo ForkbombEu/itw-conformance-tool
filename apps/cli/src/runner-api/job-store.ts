@@ -20,15 +20,6 @@ export interface StoredRun {
   createdAt: string;
   idempotencyKeyHash: string;
   namespace: string;
-  pendingInteractions?: Array<{
-    correlation_id?: string;
-    created_at: string;
-    expires_at: string;
-    interaction_id: string;
-    kind: 'browser_authorization' | 'wallet_deeplink' | 'wallet_qr';
-    scenario_id: string;
-    uri: string;
-  }>;
   request: RunRequest;
   requestHash: string;
   result?: import('./contract.js').RunnerResult;

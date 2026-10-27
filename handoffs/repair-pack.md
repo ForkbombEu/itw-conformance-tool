@@ -146,7 +146,7 @@ pnpm build
 
 - Real SUT acceptance NOT RUN (requires operator-supplied RP/TA/wallet)
 - Issuance automation NOT IMPLEMENTED (by design — presentation first)
-- Native file engagement driver not wired to scenario runner env resolver (N03 partial)
+- ~~Native file engagement driver not wired to scenario runner env resolver (N03 partial)~~ fixed in N11 completion
 - `engine.revision` is `"unknown"` — needs real build metadata at runtime
 
 ---

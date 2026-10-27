@@ -9,8 +9,15 @@ export interface EngagementInteraction {
   uri: string;
 }
 
+export interface EngagementAck {
+  driverStatus: 'completed' | 'failed';
+  message?: string;
+}
+
 export interface EngagementDriver {
   close(interactionId: string): Promise<void>;
   publish(interaction: EngagementInteraction): Promise<void>;
+  /** The external driver's ACK for a published interaction, if one arrived. Never a verdict. */
+  readAck?(interactionId: string): Promise<EngagementAck | undefined>;
   recordOutcome?(outcome: ScenarioOutcome): Promise<void>;
 }

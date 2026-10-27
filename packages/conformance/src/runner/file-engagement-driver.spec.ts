@@ -1,184 +1,137 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { acknowledgeInteraction, listPendingInteractions, readScenarioOutcomes } from '@itw-conformance-tool/utils';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createFileEngagementDriver, readPendingInteraction, writeAck } from './file-engagement-driver.js';
+import { createObservedEvent } from '../events/event-bus.js';
+import { controlledRegistry } from './__fixtures__/automation-scenario.js';
+import { createFileEngagementDriver, resolveAutomationEngagementDriver } from './file-engagement-driver.js';
+import { createProtocolObservedScenarioRunner } from './scenario-runner.js';
 
-import type { EngagementInteraction } from './engagement-driver.js';
+import type { EngagementDriver } from './engagement-driver.js';
 
-function makeInteraction(overrides: Partial<EngagementInteraction> = {}): EngagementInteraction {
-  return {
-    correlationId: 'corr-1',
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    interactionId: 'int-1',
-    kind: 'wallet_deeplink',
-    scenarioId: 'WP_RP_HAPPY',
-    uri: 'openid4vp://authorize?request_uri=https://rp.example/request',
-    ...overrides
-  };
-}
-
-let tempDir: string;
+let root: string;
+const saved = { dir: process.env.ITWCT_AUTOMATION_DIR, run: process.env.ITWCT_RUN_ID };
 
 beforeEach(() => {
-  tempDir = mkdtempSync(join(tmpdir(), 'wct-file-drv-'));
+  root = mkdtempSync(join(tmpdir(), 'wct-file-drv-'));
 });
 
 afterEach(() => {
-  rmSync(tempDir, { force: true, recursive: true });
+  rmSync(root, { force: true, recursive: true });
+  for (const [key, value] of [
+    ['ITWCT_AUTOMATION_DIR', saved.dir],
+    ['ITWCT_RUN_ID', saved.run]
+  ] as const) {
+    if (value === undefined) Reflect.deleteProperty(process.env, key);
+    else process.env[key] = value;
+  }
 });
 
-describe('file engagement driver — publish', () => {
-  it('publishes interaction to file', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
+const silent = (): void => undefined;
 
-    const filePath = join(tempDir, 'interactions', 'int-1.json');
-    expect(existsSync(filePath)).toBe(true);
-
-    const record = JSON.parse(readFileSync(filePath, 'utf-8'));
-    expect(record.lifecycle).toBe('pending');
-    expect(record.interaction.interactionId).toBe('int-1');
+describe('resolveAutomationEngagementDriver', () => {
+  it('neither env var keeps human mode', () => {
+    expect(resolveAutomationEngagementDriver({})).toBeUndefined();
   });
 
-  it('preserves original URI exactly', async () => {
-    const uri = 'openid4vp://authorize?request_uri=https://rp.example/request%3Ffoo%3Dbar';
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction({ uri }));
-
-    const record = JSON.parse(readFileSync(join(tempDir, 'interactions', 'int-1.json'), 'utf-8'));
-    expect(record.interaction.uri).toBe(uri);
+  it('incomplete automation env is rejected', () => {
+    expect(() => resolveAutomationEngagementDriver({ ITWCT_AUTOMATION_DIR: root })).toThrow(/Both/);
+    expect(() => resolveAutomationEngagementDriver({ ITWCT_RUN_ID: 'r' })).toThrow(/Both/);
   });
 
-  it('rejects unsafe interaction IDs', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await expect(driver.publish(makeInteraction({ interactionId: '../evil' }))).rejects.toThrow(
-      /Invalid interaction ID/
-    );
-  });
-});
-
-describe('file engagement driver — close', () => {
-  it('closes an interaction', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-    await driver.close('int-1');
-
-    const record = JSON.parse(readFileSync(join(tempDir, 'interactions', 'int-1.json'), 'utf-8'));
-    expect(record.lifecycle).toBe('closed');
-  });
-
-  it('close is idempotent', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-    await driver.close('int-1');
-    await driver.close('int-1');
-
-    const record = JSON.parse(readFileSync(join(tempDir, 'interactions', 'int-1.json'), 'utf-8'));
-    expect(record.lifecycle).toBe('closed');
+  it('the scenario runner rejects incomplete automation env at construction', () => {
+    process.env.ITWCT_RUN_ID = 'run-x';
+    Reflect.deleteProperty(process.env, 'ITWCT_AUTOMATION_DIR');
+    expect(() =>
+      createProtocolObservedScenarioRunner({ endpoints: {}, registry: controlledRegistry(), write: silent })
+    ).toThrow(/Both ITWCT_AUTOMATION_DIR and ITWCT_RUN_ID/);
   });
 });
 
-describe('file engagement driver — recordOutcome', () => {
-  it('writes outcome to outcomes directory', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.recordOutcome?.({
-      evidence: [],
-      forbiddenEvidence: [],
-      missingEvidence: [],
-      reason: 'test',
-      testCaseId: 'test-1',
-      timings: { completedAt: new Date().toISOString(), durationMs: 100, startedAt: new Date().toISOString() },
-      verdict: 'PASS'
+describe('protocol-observed runner with the auto-installed file driver', () => {
+  async function startAutomated(testerActionMs?: number) {
+    process.env.ITWCT_AUTOMATION_DIR = root;
+    process.env.ITWCT_RUN_ID = 'run-native-1';
+    const runner = createProtocolObservedScenarioRunner({
+      browserOpener: async () => {
+        throw new Error('the system browser must not be opened in automation mode');
+      },
+      endpoints: {},
+      registry: controlledRegistry(testerActionMs),
+      write: silent
     });
+    const session = await runner.start('WP_RP_HAPPY');
+    return { runner, session };
+  }
 
-    const filePath = join(tempDir, 'outcomes', 'test-1.json');
-    expect(existsSync(filePath)).toBe(true);
-  });
-});
+  it('publishes a real interaction file, observes the ACK, records the PASS verdict and closes', async () => {
+    const { runner, session } = await startAutomated();
+    await session.showInstructions();
 
-describe('file engagement driver — readPendingInteraction', () => {
-  it('returns pending interaction', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
+    const [pending] = listPendingInteractions(root, 'run-native-1').pending;
+    expect(pending?.scenarioId).toBe('WP_RP_HAPPY');
+    expect(pending?.uri).toContain('openid4vp://authorize');
+    expect(pending?.correlationId).toBe(session.correlationId);
 
-    const record = readPendingInteraction(tempDir, 'run-1');
-    expect(record).toBeDefined();
-    expect(record?.interaction.interactionId).toBe('int-1');
-  });
+    expect(
+      acknowledgeInteraction(root, 'run-native-1', pending?.interactionId ?? '', { driverStatus: 'completed' })
+    ).toBe('accepted');
+    const driver = createFileEngagementDriver({ automationDir: root, runId: 'run-native-1' });
+    expect(await driver.readAck?.(pending?.interactionId ?? '')).toEqual({ driverStatus: 'completed' });
 
-  it('returns undefined when no pending interactions', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-    await driver.close('int-1');
+    // The ACK alone does not produce a verdict: the protocol event does.
+    await session.events.emit(
+      createObservedEvent({ correlationId: null, name: 'rp.request_object.requested', service: 'relying-party' })
+    );
+    const outcome = await session.awaitVerdict();
+    await session.stop();
+    await runner.close();
 
-    expect(readPendingInteraction(tempDir, 'run-1')).toBeUndefined();
-  });
-
-  it('skips corrupt JSON files', async () => {
-    mkdirSync(join(tempDir, 'interactions'), { recursive: true });
-    writeFileSync(join(tempDir, 'interactions', 'corrupt.json'), 'not json');
-
-    expect(readPendingInteraction(tempDir, 'run-1')).toBeUndefined();
-  });
-});
-
-describe('file engagement driver — writeAck', () => {
-  it('writes ACK for pending interaction', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-
-    writeAck(tempDir, 'int-1', { driver_status: 'completed' });
-
-    const record = JSON.parse(readFileSync(join(tempDir, 'interactions', 'int-1.json'), 'utf-8'));
-    expect(record.lifecycle).toBe('acknowledged');
-    expect(record.ack.driver_status).toBe('completed');
+    expect(outcome.verdict).toBe('PASS');
+    expect(readScenarioOutcomes(root, 'run-native-1').outcomes.map((o) => [o.scenarioId, o.verdict])).toEqual([
+      ['WP_RP_HAPPY', 'PASS']
+    ]);
+    expect(listPendingInteractions(root, 'run-native-1').pending).toEqual([]);
+    expect(readdirSync(join(root, 'closed'))).toHaveLength(1);
   });
 
-  it('identical ACK replay is idempotent', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-
-    writeAck(tempDir, 'int-1', { driver_status: 'completed' });
-    expect(() => writeAck(tempDir, 'int-1', { driver_status: 'completed' })).not.toThrow();
+  it('an ACK without protocol evidence never becomes PASS (INCONCLUSIVE is recorded)', async () => {
+    const { runner, session } = await startAutomated(300);
+    await session.showInstructions();
+    const [pending] = listPendingInteractions(root, 'run-native-1').pending;
+    acknowledgeInteraction(root, 'run-native-1', pending?.interactionId ?? '', { driverStatus: 'completed' });
+    const outcome = await session.awaitVerdict();
+    await session.stop();
+    await runner.close();
+    expect(outcome.verdict).toBe('INCONCLUSIVE');
+    expect(readScenarioOutcomes(root, 'run-native-1').outcomes[0]?.verdict).toBe('INCONCLUSIVE');
   });
 
-  it('conflicting ACK throws', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-
-    writeAck(tempDir, 'int-1', { driver_status: 'completed' });
-    expect(() => writeAck(tempDir, 'int-1', { driver_status: 'failed' })).toThrow(/ACK conflict/);
-  });
-
-  it('close wins over late ACK', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-    await driver.close('int-1');
-
-    writeAck(tempDir, 'int-1', { driver_status: 'completed' });
-    const record = JSON.parse(readFileSync(join(tempDir, 'interactions', 'int-1.json'), 'utf-8'));
-    expect(record.lifecycle).toBe('closed');
-  });
-
-  it('throws for unknown interaction', () => {
-    expect(() => writeAck(tempDir, 'nonexistent', { driver_status: 'completed' })).toThrow(/not found/);
-  });
-
-  it('rejects traversal IDs', () => {
-    expect(() => writeAck(tempDir, '../evil', { driver_status: 'completed' })).toThrow(/Invalid interaction ID/);
-  });
-});
-
-describe('file engagement driver — atomic writes', () => {
-  it('readers never see partially written files', async () => {
-    const driver = createFileEngagementDriver({ automationDir: tempDir, runId: 'run-1' });
-    await driver.publish(makeInteraction());
-
-    // Read immediately after publish — should be complete JSON
-    const raw = readFileSync(join(tempDir, 'interactions', 'int-1.json'), 'utf-8');
-    expect(() => JSON.parse(raw)).not.toThrow();
+  it('an explicit driver option takes precedence over the automation env', async () => {
+    process.env.ITWCT_AUTOMATION_DIR = root;
+    process.env.ITWCT_RUN_ID = 'run-native-1';
+    const published: string[] = [];
+    const explicit: EngagementDriver = {
+      async close() {
+        // Nothing to close for this recording driver.
+      },
+      async publish(interaction) {
+        published.push(interaction.interactionId);
+      }
+    };
+    const runner = createProtocolObservedScenarioRunner({
+      endpoints: {},
+      engagementDriver: explicit,
+      registry: controlledRegistry(),
+      write: silent
+    });
+    const session = await runner.start('WP_RP_HAPPY');
+    await session.showInstructions();
+    await session.stop();
+    expect(published).toHaveLength(1);
+    expect(existsSync(join(root, 'interactions'))).toBe(false);
   });
 });

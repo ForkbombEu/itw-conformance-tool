@@ -35,6 +35,7 @@ import { type TrustAnchorFaultController } from '../services/trust-anchor-fault-
 import { createProtocolObservedVerdictEngine, type VerdictEngine } from '../verdict/verdict-engine.js';
 import { copyTextToClipboard } from './clipboard.js';
 import { createPresentationRequestPageUrl, renderTerminalQrCode, targetsLoopbackHost } from './engagement.js';
+import { resolveAutomationEngagementDriver } from './file-engagement-driver.js';
 import { createScenarioPromptModel, getProtocolEventLabel, getRequiredEventLabel } from './prompts.js';
 
 import type { ScenarioEventBridgeFactory } from '../events/event-bridge.js';
@@ -592,18 +593,11 @@ export function createProtocolObservedScenarioRunner(
   const verbose = options.verbose ?? process.env.ITWCT_CONFORMANCE_VERBOSE === '1';
   const activeSessions = new Set<InteractiveScenarioSession>();
 
-  // Auto-install file engagement driver when automation env is set
-  let engagementDriver: EngagementDriver | undefined = options.engagementDriver;
-  const automationDir = process.env.ITWCT_AUTOMATION_DIR;
-  const runId = process.env.ITWCT_RUN_ID;
-  if (!engagementDriver && automationDir && runId) {
-    const { createFileEngagementDriver } = require('./file-engagement-driver.js') as {
-      createFileEngagementDriver: (o: { automationDir: string; runId: string }) => EngagementDriver;
-    };
-    engagementDriver = createFileEngagementDriver({ automationDir, runId });
-  } else if (!engagementDriver && (automationDir || runId)) {
-    throw new Error('Both ITWCT_AUTOMATION_DIR and ITWCT_RUN_ID must be set for automation mode');
-  }
+  // An explicit driver option takes precedence; otherwise a complete
+  // automation env (ITWCT_AUTOMATION_DIR + ITWCT_RUN_ID) installs the file
+  // driver, an incomplete one is rejected, and neither keeps human mode.
+  const engagementDriver: EngagementDriver | undefined =
+    options.engagementDriver ?? resolveAutomationEngagementDriver();
 
   return {
     async start(id, startOptions = {}) {
@@ -789,7 +783,10 @@ export function createProtocolObservedScenarioRunner(
                   interactionId: `interaction-${initialCorrelationId}`,
                   kind:
                     stimulus.type === 'presentation-request'
-                      ? 'wallet_deeplink'
+                      ? definition.stimulus.type === 'presentation-request' &&
+                        !definition.stimulus.delivery.includes('deep-link')
+                        ? 'wallet_qr'
+                        : 'wallet_deeplink'
                       : stimulus.type === 'credential-offer'
                         ? 'wallet_deeplink'
                         : 'browser_authorization',

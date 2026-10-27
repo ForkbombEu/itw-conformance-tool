@@ -91,10 +91,15 @@ export function createRunnerServer(deps: RunnerDependencies): FastifyInstance {
 
   app.post('/v1/runs/:runId/interactions/:interactionId/ack', async (req: FastifyRequest) => {
     const { runId, interactionId } = req.params as { runId: string; interactionId: string };
-    const body = req.body as { driver_status?: string; message?: string };
+    const body = req.body as { driver_status?: unknown; message?: unknown } | undefined;
     if (!body || (body.driver_status !== 'completed' && body.driver_status !== 'failed')) {
       throw invalidRequest("driver_status must be 'completed' or 'failed'");
     }
+    if (body.message !== undefined && (typeof body.message !== 'string' || body.message.length > 2_048)) {
+      throw invalidRequest('message must be a string of at most 2048 characters');
+    }
+    const extraKeys = Object.keys(body).filter((key) => key !== 'driver_status' && key !== 'message');
+    if (extraKeys.length > 0) throw invalidRequest(`Unknown ACK fields: ${extraKeys.join(', ')}`);
     return deps.jobManager.acknowledge(runId, interactionId, {
       driver_status: body.driver_status,
       message: body.message
