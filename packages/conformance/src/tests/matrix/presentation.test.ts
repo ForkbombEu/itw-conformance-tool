@@ -29,6 +29,7 @@ import {
   wpRpHappyPostScenario,
   wpRpHappyScenario
 } from '../../index.js';
+import { registerSelectedScenario } from '../../scenarios/selected-registration.js';
 import { httpsRequest } from '../../utils/request.js';
 
 import type {
@@ -140,8 +141,20 @@ const selectedScenarioIds = (process.env[SCENARIO_IDS_ENV_VAR] ?? '')
   .map((id) => id.trim())
   .filter((id) => id.length > 0);
 
+const isAutomated = Boolean(process.env.ITWCT_AUTOMATION_DIR && process.env.ITWCT_RUN_ID);
+
 function isSelected(definition: ProtocolObservedScenarioDefinition): boolean {
   return selectedScenarioIds.length === 0 || selectedScenarioIds.includes(definition.id);
+}
+
+function scenarioDescribe(definition: ProtocolObservedScenarioDefinition): (title: string, body: () => void) => void {
+  return (title: string, body: () => void) => {
+    registerSelectedScenario(
+      { automated: isAutomated, selected: isSelected(definition) },
+      () => describe(title, body),
+      () => describe.skip(title, body)
+    );
+  };
 }
 
 /**
@@ -361,7 +374,7 @@ describe('Test Cases for Presentation Phase', () => {
   // negative cases (WP_081, WP_085, WP_086, WP_087, WP_090, WP_091a, WP_094a) and
   // the UI-only cases (WP_088, WP_089, WP_089a, WP_089b) require dedicated
   // unhappy-path scenarios and are intentionally excluded.
-  describe.skipIf(!isSelected(wpRpHappyScenario))('Happy path — full remote presentation flow', () => {
+  registerScenario(wpRpHappyScenario, 'Happy path — full remote presentation flow', () => {
     let outcome: ScenarioOutcome;
     let events: ObservedEvent[];
 
@@ -597,141 +610,129 @@ describe('Test Cases for Presentation Phase', () => {
   // that started the flow is on another device — so the Relying Party withholds
   // it and the browser reaches the same destination by polling /status. There is
   // no redirect for the wallet to follow, and none is expected.
-  describe.skipIf(!isSelected(wpRpHappyPostScenario))(
-    'Happy path — Request Object retrieved with a POST (cross-device)',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wpRpHappyPostScenario)('Happy path — Request Object retrieved with a POST (cross-device)', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wpRpHappyPostScenario);
-      }, wpRpHappyPostScenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wpRpHappyPostScenario);
+    }, wpRpHappyPostScenario.timeouts.vitestTestMs);
 
-      function requestObjectEvent(): ObservedEvent {
-        const event = findEvent(run.events, 'rp.request_object.requested');
-        if (!event) {
-          throw new Error('Missing rp.request_object.requested evidence required for the POST retrieval analysis');
-        }
-        return event;
+    function requestObjectEvent(): ObservedEvent {
+      const event = findEvent(run.events, 'rp.request_object.requested');
+      if (!event) {
+        throw new Error('Missing rp.request_object.requested evidence required for the POST retrieval analysis');
       }
-
-      function walletMetadata(): Record<string, unknown> {
-        const metadata = requestObjectEvent().diagnostic?.['walletMetadata'];
-        if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
-          throw new Error('rp.request_object.requested evidence is missing a wallet_metadata JSON object');
-        }
-        return metadata as Record<string, unknown>;
-      }
-
-      test('[WP_077]: Wallet Instance obtains the Remote Presentation URL from a QR code', () => {
-        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-      });
-
-      test('[WP_083]: Wallet Instance retrieves the Request Object via HTTP POST with wallet_metadata and wallet_nonce', () => {
-        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-
-        const event = requestObjectEvent();
-        expect(event.diagnostic?.['method'], 'Request Object should be fetched via POST').toBe('POST');
-        expect(event.diagnostic?.['endpoint'], 'Request Object should be fetched from the request_uri endpoint').toBe(
-          '/auth/request/:state'
-        );
-        expect(
-          String(event.diagnostic?.['contentType'] ?? ''),
-          'POST body should be sent as application/x-www-form-urlencoded'
-        ).toContain('application/x-www-form-urlencoded');
-        expect(
-          event.diagnostic?.['walletMetadataWellFormed'],
-          'wallet_metadata should be present and parse as JSON'
-        ).toBe(true);
-        expect(event.diagnostic?.['walletNonce'], 'wallet_nonce should be present in the POST body').toBeTypeOf(
-          'string'
-        );
-      });
-
-      test('[WP_083a]: Wallet Instance formats wallet_metadata as JSON per the specification', () => {
-        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-
-        const metadata = walletMetadata();
-        for (const member of REQUIRED_WALLET_METADATA_MEMBERS) {
-          expect(Object.keys(metadata), `wallet_metadata should declare ${member}`).toContain(member);
-        }
-      });
-
-      test('[WP_083b]: wallet_metadata contains no user-identifiable or device-specific data', () => {
-        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-
-        const { memberNames, stringValues } = collectJsonEntries(walletMetadata());
-
-        const personalMembers = memberNames.filter((memberName) =>
-          PERSONAL_DATA_MEMBER_FRAGMENTS.some((fragment) => memberName.toLowerCase().includes(fragment))
-        );
-        expect(
-          personalMembers,
-          'wallet_metadata should not declare user-identifiable or device-specific members'
-        ).toEqual([]);
-
-        const personalValues = stringValues.filter(
-          (value) => EMAIL_ADDRESS_PATTERN.test(value) || ITALIAN_FISCAL_CODE_PATTERN.test(value)
-        );
-        expect(personalValues, 'wallet_metadata values should not contain e-mail addresses or fiscal codes').toEqual(
-          []
-        );
-      });
-
-      test('[WP_083c]: Wallet Instance sends a freshly generated wallet_nonce', () => {
-        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-
-        const event = requestObjectEvent();
-        const walletNonce = event.diagnostic?.['walletNonce'];
-        expect(walletNonce, 'wallet_nonce should be a non-empty string').toBeTypeOf('string');
-
-        // A single flow cannot prove the nonce is fresh across runs; what it can
-        // prove is that the wallet generated an unpredictable value of its own
-        // rather than echoing a value the Relying Party gave it.
-        const nonce = String(walletNonce);
-        expect(nonce.length, 'wallet_nonce should carry enough entropy to prevent replay').toBeGreaterThanOrEqual(16);
-
-        const verified = findEvent(run.events, 'vp_token.validation.succeeded');
-        expect(nonce, 'wallet_nonce must not reuse the Relying Party nonce').not.toBe(verified?.diagnostic?.['nonce']);
-        expect(nonce, 'wallet_nonce must not reuse the Request Object state').not.toBe(
-          verified?.diagnostic?.['requestObjectState']
-        );
-        expect(event.diagnostic?.['walletNonceEchoed'], 'the Relying Party should echo the wallet_nonce back').toBe(
-          true
-        );
-      });
+      return event;
     }
-  );
 
-  describe.skipIf(!isSelected(wp079Scenario))(
-    'Negative path — Trust Chain that does not reach the Trust Anchor',
-    () => {
-      let run: PresentationRun;
+    function walletMetadata(): Record<string, unknown> {
+      const metadata = requestObjectEvent().diagnostic?.['walletMetadata'];
+      if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+        throw new Error('rp.request_object.requested evidence is missing a wallet_metadata JSON object');
+      }
+      return metadata as Record<string, unknown>;
+    }
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp079Scenario);
-      }, wp079Scenario.timeouts.vitestTestMs);
+    test('[WP_077]: Wallet Instance obtains the Remote Presentation URL from a QR code', () => {
+      assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+    });
 
-      test(
-        '[WP_079]: Wallet Instance validates the Relying Party Trust Chain and stops when it does not reach the Trust Anchor',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'invalid-trust-anchor');
+    test('[WP_083]: Wallet Instance retrieves the Request Object via HTTP POST with wallet_metadata and wallet_nonce', () => {
+      assertConformanceOutcome(run.outcome, { expected: 'PASS' });
 
-          expect(
-            findEvent(run.events, 'federation.fetch.requested'),
-            'Wallet must not resolve a subordinate statement from a Trust Anchor the Relying Party does not name'
-          ).toBeUndefined();
-          expect(
-            findEvent(run.events, 'rp.request_object.requested'),
-            'Wallet must not retrieve the Request Object after failing to build the Trust Chain'
-          ).toBeUndefined();
-        },
-        wp079Scenario.timeouts.vitestTestMs
+      const event = requestObjectEvent();
+      expect(event.diagnostic?.['method'], 'Request Object should be fetched via POST').toBe('POST');
+      expect(event.diagnostic?.['endpoint'], 'Request Object should be fetched from the request_uri endpoint').toBe(
+        '/auth/request/:state'
       );
-    }
-  );
+      expect(
+        String(event.diagnostic?.['contentType'] ?? ''),
+        'POST body should be sent as application/x-www-form-urlencoded'
+      ).toContain('application/x-www-form-urlencoded');
+      expect(
+        event.diagnostic?.['walletMetadataWellFormed'],
+        'wallet_metadata should be present and parse as JSON'
+      ).toBe(true);
+      expect(event.diagnostic?.['walletNonce'], 'wallet_nonce should be present in the POST body').toBeTypeOf('string');
+    });
 
-  describe.skipIf(!isSelected(wp080Scenario))('Negative path — Trust Mark that cannot be verified', () => {
+    test('[WP_083a]: Wallet Instance formats wallet_metadata as JSON per the specification', () => {
+      assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+
+      const metadata = walletMetadata();
+      for (const member of REQUIRED_WALLET_METADATA_MEMBERS) {
+        expect(Object.keys(metadata), `wallet_metadata should declare ${member}`).toContain(member);
+      }
+    });
+
+    test('[WP_083b]: wallet_metadata contains no user-identifiable or device-specific data', () => {
+      assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+
+      const { memberNames, stringValues } = collectJsonEntries(walletMetadata());
+
+      const personalMembers = memberNames.filter((memberName) =>
+        PERSONAL_DATA_MEMBER_FRAGMENTS.some((fragment) => memberName.toLowerCase().includes(fragment))
+      );
+      expect(
+        personalMembers,
+        'wallet_metadata should not declare user-identifiable or device-specific members'
+      ).toEqual([]);
+
+      const personalValues = stringValues.filter(
+        (value) => EMAIL_ADDRESS_PATTERN.test(value) || ITALIAN_FISCAL_CODE_PATTERN.test(value)
+      );
+      expect(personalValues, 'wallet_metadata values should not contain e-mail addresses or fiscal codes').toEqual([]);
+    });
+
+    test('[WP_083c]: Wallet Instance sends a freshly generated wallet_nonce', () => {
+      assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+
+      const event = requestObjectEvent();
+      const walletNonce = event.diagnostic?.['walletNonce'];
+      expect(walletNonce, 'wallet_nonce should be a non-empty string').toBeTypeOf('string');
+
+      // A single flow cannot prove the nonce is fresh across runs; what it can
+      // prove is that the wallet generated an unpredictable value of its own
+      // rather than echoing a value the Relying Party gave it.
+      const nonce = String(walletNonce);
+      expect(nonce.length, 'wallet_nonce should carry enough entropy to prevent replay').toBeGreaterThanOrEqual(16);
+
+      const verified = findEvent(run.events, 'vp_token.validation.succeeded');
+      expect(nonce, 'wallet_nonce must not reuse the Relying Party nonce').not.toBe(verified?.diagnostic?.['nonce']);
+      expect(nonce, 'wallet_nonce must not reuse the Request Object state').not.toBe(
+        verified?.diagnostic?.['requestObjectState']
+      );
+      expect(event.diagnostic?.['walletNonceEchoed'], 'the Relying Party should echo the wallet_nonce back').toBe(true);
+    });
+  });
+
+  scenarioDescribe(wp079Scenario)('Negative path — Trust Chain that does not reach the Trust Anchor', () => {
+    let run: PresentationRun;
+
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp079Scenario);
+    }, wp079Scenario.timeouts.vitestTestMs);
+
+    test(
+      '[WP_079]: Wallet Instance validates the Relying Party Trust Chain and stops when it does not reach the Trust Anchor',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'invalid-trust-anchor');
+
+        expect(
+          findEvent(run.events, 'federation.fetch.requested'),
+          'Wallet must not resolve a subordinate statement from a Trust Anchor the Relying Party does not name'
+        ).toBeUndefined();
+        expect(
+          findEvent(run.events, 'rp.request_object.requested'),
+          'Wallet must not retrieve the Request Object after failing to build the Trust Chain'
+        ).toBeUndefined();
+      },
+      wp079Scenario.timeouts.vitestTestMs
+    );
+  });
+
+  scenarioDescribe(wp080Scenario)('Negative path — Trust Mark that cannot be verified', () => {
     let run: PresentationRun;
 
     beforeAll(async () => {
@@ -753,55 +754,49 @@ describe('Test Cases for Presentation Phase', () => {
     );
   });
 
-  describe.skipIf(!isSelected(wp081Scenario))(
-    'Negative path — request_uri absent from the Relying Party metadata',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp081Scenario)('Negative path — request_uri absent from the Relying Party metadata', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp081Scenario);
-      }, wp081Scenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp081Scenario);
+    }, wp081Scenario.timeouts.vitestTestMs);
 
-      test(
-        '[WP_081]: Wallet Instance only retrieves a request_uri attested in the Relying Party metadata',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'unattested-request-uri');
+    test(
+      '[WP_081]: Wallet Instance only retrieves a request_uri attested in the Relying Party metadata',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'unattested-request-uri');
 
-          expect(
-            findEvent(run.events, 'rp.request_object.requested'),
-            'Wallet must not request a request_uri that the Relying Party metadata does not attest'
-          ).toBeUndefined();
-        },
-        wp081Scenario.timeouts.vitestTestMs
-      );
-    }
-  );
+        expect(
+          findEvent(run.events, 'rp.request_object.requested'),
+          'Wallet must not request a request_uri that the Relying Party metadata does not attest'
+        ).toBeUndefined();
+      },
+      wp081Scenario.timeouts.vitestTestMs
+    );
+  });
 
-  describe.skipIf(!isSelected(wp087Scenario))(
-    'Negative path — Relying Party not authorized to request presentations',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp087Scenario)('Negative path — Relying Party not authorized to request presentations', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp087Scenario);
-      }, wp087Scenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp087Scenario);
+    }, wp087Scenario.timeouts.vitestTestMs);
 
-      test(
-        '[WP_087]: Wallet Instance authorizes a presentation only when the federation attests the Relying Party may request it',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'missing-presentation-trust-mark');
+    test(
+      '[WP_087]: Wallet Instance authorizes a presentation only when the federation attests the Relying Party may request it',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'missing-presentation-trust-mark');
 
-          expect(
-            findEvent(run.events, 'rp.request_object.requested'),
-            'Wallet must not retrieve the Request Object of a Relying Party the federation does not authorize'
-          ).toBeUndefined();
-        },
-        wp087Scenario.timeouts.vitestTestMs
-      );
-    }
-  );
+        expect(
+          findEvent(run.events, 'rp.request_object.requested'),
+          'Wallet must not retrieve the Request Object of a Relying Party the federation does not authorize'
+        ).toBeUndefined();
+      },
+      wp087Scenario.timeouts.vitestTestMs
+    );
+  });
 
   // WP_084 is a happy path, not a negative one: the wallet is expected to
   // complete the presentation. What makes the case conclusive is the trust model
@@ -811,69 +806,66 @@ describe('Test Cases for Presentation Phase', () => {
   //
   // It is therefore also the run that exercises the federation discovery, which
   // an `x509_hash` engagement never triggers: WP_078 lives here.
-  describe.skipIf(!isSelected(wp084Scenario))(
-    'Happy path — Relying Party key published only in the federation metadata',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp084Scenario)('Happy path — Relying Party key published only in the federation metadata', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp084Scenario);
-      }, wp084Scenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp084Scenario);
+    }, wp084Scenario.timeouts.vitestTestMs);
 
-      test('[WP_078]: Wallet Instance fetches the Relying Party OpenID Federation endpoint', () => {
+    test('[WP_078]: Wallet Instance fetches the Relying Party OpenID Federation endpoint', () => {
+      assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+
+      expect(
+        findEvent(run.events, 'rp.metadata.requested'),
+        'Wallet must resolve the Relying Party Entity Configuration when the client_id names the entity'
+      ).toBeDefined();
+    });
+
+    test(
+      '[WP_084]: Wallet Instance resolves the Relying Party public key from metadata.openid_credential_verifier.jwks using the Request Object kid',
+      async () => {
         assertConformanceOutcome(run.outcome, { expected: 'PASS' });
 
+        // The served Request Object really did carry no certificate chain,
+        // and the kid the wallet had to resolve is recorded alongside it.
+        const requestObjectEvent = findEvent(run.events, 'rp.request_object.requested');
         expect(
-          findEvent(run.events, 'rp.metadata.requested'),
-          'Wallet must resolve the Relying Party Entity Configuration when the client_id names the entity'
+          requestObjectEvent?.diagnostic?.['clientIdPrefix'],
+          'The client_id must carry the openid_federation prefix so the wallet resolves the key through the Trust Chain'
+        ).toBe('openid_federation');
+        expect(
+          requestObjectEvent?.diagnostic?.['hasX5c'],
+          'The federation Request Object must carry no certificate chain: it is the alternative key source this case removes'
+        ).toBe(false);
+
+        const signingKeyId = requestObjectEvent?.diagnostic?.['signingKeyId'];
+        expect(
+          typeof signingKeyId === 'string' && signingKeyId.length > 0,
+          'The Request Object must keep a kid: with no x5c it is the only handle on the signing key'
+        ).toBe(true);
+
+        // The kid must actually resolve in the Entity Configuration the wallet
+        // fetched, otherwise the scenario would be unsatisfiable rather than
+        // conclusive.
+        const entityConfiguration = await fetchRelyingPartyEntityConfiguration();
+        expect(
+          verifierJwks(entityConfiguration).map((key) => key.kid),
+          'The Request Object signing key must be published in metadata.openid_credential_verifier.jwks'
+        ).toContain(signingKeyId);
+
+        // The presentation completed, so the wallet verified a Request Object
+        // it could only have verified with that key.
+        expect(
+          findEvent(run.events, 'vp_token.validation.succeeded'),
+          'The Relying Party must have verified a presentation for the federation-signed Request Object'
         ).toBeDefined();
-      });
+      },
+      wp084Scenario.timeouts.vitestTestMs
+    );
+  });
 
-      test(
-        '[WP_084]: Wallet Instance resolves the Relying Party public key from metadata.openid_credential_verifier.jwks using the Request Object kid',
-        async () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-
-          // The served Request Object really did carry no certificate chain,
-          // and the kid the wallet had to resolve is recorded alongside it.
-          const requestObjectEvent = findEvent(run.events, 'rp.request_object.requested');
-          expect(
-            requestObjectEvent?.diagnostic?.['clientIdPrefix'],
-            'The client_id must carry the openid_federation prefix so the wallet resolves the key through the Trust Chain'
-          ).toBe('openid_federation');
-          expect(
-            requestObjectEvent?.diagnostic?.['hasX5c'],
-            'The federation Request Object must carry no certificate chain: it is the alternative key source this case removes'
-          ).toBe(false);
-
-          const signingKeyId = requestObjectEvent?.diagnostic?.['signingKeyId'];
-          expect(
-            typeof signingKeyId === 'string' && signingKeyId.length > 0,
-            'The Request Object must keep a kid: with no x5c it is the only handle on the signing key'
-          ).toBe(true);
-
-          // The kid must actually resolve in the Entity Configuration the wallet
-          // fetched, otherwise the scenario would be unsatisfiable rather than
-          // conclusive.
-          const entityConfiguration = await fetchRelyingPartyEntityConfiguration();
-          expect(
-            verifierJwks(entityConfiguration).map((key) => key.kid),
-            'The Request Object signing key must be published in metadata.openid_credential_verifier.jwks'
-          ).toContain(signingKeyId);
-
-          // The presentation completed, so the wallet verified a Request Object
-          // it could only have verified with that key.
-          expect(
-            findEvent(run.events, 'vp_token.validation.succeeded'),
-            'The Relying Party must have verified a presentation for the federation-signed Request Object'
-          ).toBeDefined();
-        },
-        wp084Scenario.timeouts.vitestTestMs
-      );
-    }
-  );
-
-  describe.skipIf(!isSelected(wp116Scenario))('Happy path — erasure endpoint discovery and request', () => {
+  scenarioDescribe(wp116Scenario)('Happy path — erasure endpoint discovery and request', () => {
     let run: PresentationRun;
     let erasureEndpoint: string | undefined;
 
@@ -965,7 +957,7 @@ describe('Test Cases for Presentation Phase', () => {
     );
   });
 
-  describe.skipIf(!isSelected(wp085Scenario))('Negative path — Request Object with an unverifiable signature', () => {
+  scenarioDescribe(wp085Scenario)('Negative path — Request Object with an unverifiable signature', () => {
     let run: PresentationRun;
 
     beforeAll(async () => {
@@ -986,133 +978,118 @@ describe('Test Cases for Presentation Phase', () => {
     );
   });
 
-  describe.skipIf(!isSelected(wp086Scenario))(
-    'Negative path — Request Object whose iss does not match the client_id',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp086Scenario)('Negative path — Request Object whose iss does not match the client_id', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp086Scenario);
-      }, wp086Scenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp086Scenario);
+    }, wp086Scenario.timeouts.vitestTestMs);
 
-      test(
-        '[WP_086]: Wallet Instance checks the Request Object iss against the client_id and the Entity Configuration sub',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'request-object-invalid-client-id', { mutatedClaim: 'iss' });
-          expectNoPresentation(
-            run.events,
-            'Wallet must not present a credential for a Request Object with an inconsistent client identifier'
-          );
-        },
-        wp086Scenario.timeouts.vitestTestMs
-      );
-    }
-  );
+    test(
+      '[WP_086]: Wallet Instance checks the Request Object iss against the client_id and the Entity Configuration sub',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'request-object-invalid-client-id', { mutatedClaim: 'iss' });
+        expectNoPresentation(
+          run.events,
+          'Wallet must not present a credential for a Request Object with an inconsistent client identifier'
+        );
+      },
+      wp086Scenario.timeouts.vitestTestMs
+    );
+  });
 
-  describe.skipIf(!isSelected(wp090Scenario))(
-    'Negative path — malformed Request Object reported to the response_uri',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp090Scenario)('Negative path — malformed Request Object reported to the response_uri', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp090Scenario);
-      }, wp090Scenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp090Scenario);
+    }, wp090Scenario.timeouts.vitestTestMs);
 
-      test(
-        '[WP_090]: Wallet Instance sends an Authorization Error Response to the response_uri for a malformed Request Object',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'request-object-missing-parameter', { omittedParameter: 'nonce' });
+    test(
+      '[WP_090]: Wallet Instance sends an Authorization Error Response to the response_uri for a malformed Request Object',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'request-object-missing-parameter', { omittedParameter: 'nonce' });
 
-          const errorResponse = findEvent(run.events, 'rp.presentation_error.received');
-          expect(
-            errorResponse,
-            'Wallet must POST an Authorization Error Response to the response_uri when the Request Object is malformed'
-          ).toBeDefined();
-          expect(errorResponse?.diagnostic?.['method'], 'the error response should be sent via POST').toBe('POST');
-          expect(errorResponse?.diagnostic?.['endpoint'], 'the error response should target the response_uri').toBe(
-            '/auth/response'
-          );
-          expect(errorResponse?.diagnostic?.['error'], 'the error response should carry an error code').toBeTypeOf(
-            'string'
-          );
+        const errorResponse = findEvent(run.events, 'rp.presentation_error.received');
+        expect(
+          errorResponse,
+          'Wallet must POST an Authorization Error Response to the response_uri when the Request Object is malformed'
+        ).toBeDefined();
+        expect(errorResponse?.diagnostic?.['method'], 'the error response should be sent via POST').toBe('POST');
+        expect(errorResponse?.diagnostic?.['endpoint'], 'the error response should target the response_uri').toBe(
+          '/auth/response'
+        );
+        expect(errorResponse?.diagnostic?.['error'], 'the error response should carry an error code').toBeTypeOf(
+          'string'
+        );
 
-          expectNoPresentation(run.events, 'Wallet must not present a credential for a malformed Request Object');
-        },
-        wp090Scenario.timeouts.vitestTestMs
-      );
-    }
-  );
+        expectNoPresentation(run.events, 'Wallet must not present a credential for a malformed Request Object');
+      },
+      wp090Scenario.timeouts.vitestTestMs
+    );
+  });
 
-  describe.skipIf(!isSelected(wp091aScenario))(
-    'Negative path — response_uri absent from the Relying Party metadata',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp091aScenario)('Negative path — response_uri absent from the Relying Party metadata', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp091aScenario);
-      }, wp091aScenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp091aScenario);
+    }, wp091aScenario.timeouts.vitestTestMs);
 
-      test(
-        '[WP_091a]: Wallet Instance only posts to a response_uri attested in the Relying Party metadata',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'unattested-response-uri');
+    test(
+      '[WP_091a]: Wallet Instance only posts to a response_uri attested in the Relying Party metadata',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'unattested-response-uri');
 
-          expect(
-            findEvent(run.events, 'rp.presentation_response.received'),
-            'Wallet must not post anything to a response_uri that the Relying Party metadata does not attest'
-          ).toBeUndefined();
-        },
-        wp091aScenario.timeouts.vitestTestMs
-      );
-    }
-  );
+        expect(
+          findEvent(run.events, 'rp.presentation_response.received'),
+          'Wallet must not post anything to a response_uri that the Relying Party metadata does not attest'
+        ).toBeUndefined();
+      },
+      wp091aScenario.timeouts.vitestTestMs
+    );
+  });
 
-  describe.skipIf(!isSelected(wp094aScenario))(
-    'Negative path — redirect_uri absent from the Relying Party metadata',
-    () => {
-      let run: PresentationRun;
+  scenarioDescribe(wp094aScenario)('Negative path — redirect_uri absent from the Relying Party metadata', () => {
+    let run: PresentationRun;
 
-      beforeAll(async () => {
-        run = await runPresentationScenario(wp094aScenario);
-      }, wp094aScenario.timeouts.vitestTestMs);
+    beforeAll(async () => {
+      run = await runPresentationScenario(wp094aScenario);
+    }, wp094aScenario.timeouts.vitestTestMs);
 
-      test(
-        '[WP_094a]: Wallet Instance does not follow a redirect_uri that the Relying Party metadata does not attest',
-        () => {
-          assertConformanceOutcome(run.outcome, { expected: 'PASS' });
-          expectFaultApplied(run.events, 'unattested-redirect-uri');
+    test(
+      '[WP_094a]: Wallet Instance does not follow a redirect_uri that the Relying Party metadata does not attest',
+      () => {
+        assertConformanceOutcome(run.outcome, { expected: 'PASS' });
+        expectFaultApplied(run.events, 'unattested-redirect-uri');
 
-          // The presentation itself must have completed: without it the Relying
-          // Party never returns a redirect_uri, so there would be nothing to check.
-          const verified = findEvent(run.events, 'vp_token.validation.succeeded');
-          expect(
-            verified,
-            'The presentation must complete before the redirect_uri check can be exercised'
-          ).toBeDefined();
+        // The presentation itself must have completed: without it the Relying
+        // Party never returns a redirect_uri, so there would be nothing to check.
+        const verified = findEvent(run.events, 'vp_token.validation.succeeded');
+        expect(verified, 'The presentation must complete before the redirect_uri check can be exercised').toBeDefined();
 
-          // The Relying Party keeps answering with its live callback endpoint,
-          // which the fault removed from the attested redirect_uris — so this is
-          // the URI the wallet had to reject. Its path is the one the nominal
-          // Entity Configuration attests, so only the fault's replacement of the
-          // attested list can make the wallet reject it.
-          const returned = new URL(String(verified?.diagnostic?.['redirectUri'] ?? ''));
-          expect(
-            `${returned.origin}${returned.pathname}`,
-            'The Relying Party should return its live callback endpoint as the redirect_uri'
-          ).toBe(`${trimTrailingSlash(config['relying-party'].url)}/callback`);
+        // The Relying Party keeps answering with its live callback endpoint,
+        // which the fault removed from the attested redirect_uris — so this is
+        // the URI the wallet had to reject. Its path is the one the nominal
+        // Entity Configuration attests, so only the fault's replacement of the
+        // attested list can make the wallet reject it.
+        const returned = new URL(String(verified?.diagnostic?.['redirectUri'] ?? ''));
+        expect(
+          `${returned.origin}${returned.pathname}`,
+          'The Relying Party should return its live callback endpoint as the redirect_uri'
+        ).toBe(`${trimTrailingSlash(config['relying-party'].url)}/callback`);
 
-          expect(
-            findEvent(run.events, 'rp.redirect.followed'),
-            'Wallet must not redirect the user-agent to a redirect_uri the Relying Party does not attest'
-          ).toBeUndefined();
-        },
-        wp094aScenario.timeouts.vitestTestMs
-      );
-    }
-  );
+        expect(
+          findEvent(run.events, 'rp.redirect.followed'),
+          'Wallet must not redirect the user-agent to a redirect_uri the Relying Party does not attest'
+        ).toBeUndefined();
+      },
+      wp094aScenario.timeouts.vitestTestMs
+    );
+  });
 
   describe('Relying Party fault cleanup', () => {
     test('deactivated faults leave the Relying Party serving its nominal Entity Configuration', async () => {
